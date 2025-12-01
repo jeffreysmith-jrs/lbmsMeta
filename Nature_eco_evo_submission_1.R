@@ -1,0 +1,2318 @@
+#################################################-
+## Initial set-up
+#################################################-
+
+#Load in libraries
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(brms)
+library(tidybayes)
+library(modelr)
+library(cmdstanr)
+library(posterior)
+library(sf)
+library(raster)
+library(terra)
+library(stringr)
+
+#Set directories 
+base_dir <- '/Users/jeffreysmith/Documents/lbmsMeta/'
+data_dir <- file.path(base_dir, 'Data/2024')
+result_dir <- file.path(base_dir, 'Results')
+figure_dir <- file.path(base_dir, 'Figures')
+
+
+#################################################-
+## convert all uncertainty types to the sample variance (s^2) ----
+#################################################-
+uncert_to_s2 <- function(uncert, type,
+                         n = NA){
+  
+  uncert <- as.numeric(uncert)
+  
+  if(is.na(type)) return(NA_real_)
+  if(grepl('standard deviation', type) == T){type <- 'SD'}
+  if(type == "SE (standard error)"){type <- 'SE'}
+  if(type == "95% CI"){type <-  "95% confidence intervals"}
+  
+  
+  if(type == "SD"){
+    return(uncert^2)
+  } else if (type == "SE"){
+    if(!is.na(n)){
+      return((uncert * sqrt(n))^2)
+    }
+  } else if (type == "95% confidence intervals"){
+    if(!is.na(n)){
+      return(((qnorm(0.975) / uncert) * sqrt(n))^2)
+    }
+  } else {
+    print(type)
+    return(NA_real_)  # TEMP: THROW AWAY NON-MATCHING UNCERTAINTY TYPES
+  }
+
+}
+
+#################################################-
+## Log response ratio, various flavors & standard errors ----
+#################################################-
+# log response ratio effect size
+lrr <- function(xbar_int, xbar_ref){
+  return(log(xbar_int / xbar_ref))
+} 
+
+# standard error of the log response ratio
+# (Hedges et al. 1999, eqs. 1 & 3, doi:10.2307/177062)
+lrr_se <- function(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref){
+  sqrt((var_int / (n_int * xbar_int^2)) +
+         (var_ref / (n_ref * xbar_ref^2)))
+}
+
+# log response ratio "Delta"
+# (Lajeunesse 2015, eq. 8, doi:10.1890/14-2402.1)
+lrrDelta <- function(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref){
+  lrr(xbar_int, xbar_ref) +
+    0.5 * ((var_int / (n_int * xbar_int^2)) - (var_ref / (n_ref * xbar_ref^2)))
+}
+
+# standard error of the log response ratio "Delta"
+# (Lajeunesse 2015, eq. 9, doi:10.1890/14-2402.1)
+lrrDelta_se <- function(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref){
+  sqrt(lrr_se(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref)^2 + 0.5 *
+         ((var_int^2 / (n_int^2 * xbar_int^4)) - (var_ref^2 / (n_ref^2 * xbar_ref^4))))
+}
+
+# log response ratio "Sigma"
+# (Lajeunesse 2015, eq. 10, doi:10.1890/14-2402.1)
+lrrSigma <- function(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref){
+  0.5 * log((xbar_int^2 + n_int^-1 * var_int) / (xbar_ref^2 + n_ref^-1 * var_ref))
+}
+
+# standard error of the log response ratio "Sigma"
+# (Lajeunesse 2015, eq. 11, doi:10.1890/14-2402.1)
+lrrSigma_se <- function(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref){
+  varRR <- lrr_se(xbar_int, xbar_ref, n_int, n_ref, var_int, var_ref)^2
+  sqrt(2 * varRR -
+         log(1 + varRR + ((var_int * var_ref) /
+                            (n_int * n_ref * xbar_int^2 * xbar_ref^2))))
+}
+
+#################################################-
+## Geary's test, corrected for small sample sizes ----
+## (Lajeunesse 2015, eq. 13, doi:10.1890/14-2402.1)
+#################################################-
+geary_test <- function(xbar, sd, n, passfail = TRUE){
+  gc <- (xbar / sd) * ((4 * n ^ (3/2)) / (1 + 4 * n))
+  if(passfail) ifelse(gc >= 3, "pass", "fail")
+  else gc
+}
+
+
+#################################################-
+## Convert area to standard units (hectares)
+#################################################-
+#FUTURE CHECK - KILOMETERS
+convert_area <- function(intervention_size, area_units){
+  
+  if(is.na(intervention_size) | is.na(area_units)) return(NA_real_)
+  
+  if(area_units == 'hectares'){
+    return(intervention_size)
+  }else if(area_units == 'hectare'){
+    return(intervention_size)
+  }else if(area_units == 'kilometers squared'){
+    return(intervention_size * 100)
+  }else if(area_units == 'kilometer radius'){
+    return((pi * intervention_size ** 2) * 100)
+  }else if(area_units == 'meters squares'){
+    return(intervention_size / 10000)
+  }else if(area_units == 'meters squared'){
+    return(intervention_size / 10000)
+  }else if(area_units == 'meters sqaured'){
+    return(intervention_size / 10000)
+  }else if(area_units == 'square meters'){
+    return(intervention_size / 10000)
+  }else if(area_units == 'hectometers squared'){
+    return(intervention_size)
+  }else if(area_units == 'square kilometers'){
+    return(intervention_size * 100)
+  }else if(area_units == 'kilmeters squares'){
+    return(intervention_size * 100)
+  }else if(area_units == 'kilometers squares'){
+    return(intervention_size * 100)
+  }else if(area_units == 'kilometers squared'){
+    return(intervention_size * 100)
+  }else if(area_units == "centimeters squared"){
+    return(intervention_size / 1e8)
+  }else if(area_units == "acres"){
+    return(intervention_size * 0.404686)
+  }else if(area_units == "kilometers"){
+    return(NA)
+  }else{
+    print(type)
+    return(NA_real_)  # TEMP: THROW AWAY NON-MATCHING AREA TYPES
+  }
+  
+  
+}
+
+
+#################################################-
+## Specify meta-analysis formula, priors, & sampling options ----
+#################################################-
+# model formula righthand side
+rhs <- "~ 1 + (1 | study_id)"
+
+#All responses
+ma_both_form <- as.formula(paste("lrr_richness", rhs,  ' + S_aggregation'))
+
+# Summed richness across all plots
+ma_sum_form <- as.formula(paste("lrr_richness_sum", rhs))
+
+# Mean richness within plot (WITH uncertainty weighting)
+ma_mean_w_form <- as.formula(paste("lrr_richness_mean",
+                                   "| se(lrr_se_richness, sigma = TRUE)",
+                                   rhs))
+
+# Mean richness within plot (WITHOUT uncertainty weighting)
+ma_mean_uw_form <- as.formula(paste("lrr_richness_mean",
+                                    rhs))
+
+
+# Formula for modeling time since intervention
+ma_lrr_time_form <- as.formula(paste('lrr_richness', 
+                                rhs, 
+                                ' + intervention_length + S_aggregation'))
+
+# Formula for modeling size of intervention
+ma_lrr_size_form <- as.formula(paste('lrr_richness', 
+                                     rhs, 
+                                     ' + log(mean_size_ha) + S_aggregation'))
+
+# Formula for modeling taxa 
+ma_lrr_taxa_form <- as.formula(paste('lrr_richness', 
+                                     rhs, 
+                                     ' + (1|taxa_grouped) + S_aggregation'))
+
+
+
+# Formula for modeling forsted biome 
+ma_lrr_forest_form <- as.formula(paste('lrr_richness', 
+                                      rhs, 
+                                      ' + forested + S_aggregation'))
+
+# Formula for forest type
+ma_lrr_forest_type_form <- as.formula(paste('lrr_richness', 
+                                       rhs, 
+                                       ' + forest_type + S_aggregation'))
+
+
+# Formula for forestation type and biome
+ma_lrr_forest_type_inter_form <- as.formula(paste('lrr_richness', 
+                                            rhs, 
+                                            ' + forest_type * forested + S_aggregation'))
+
+# Formula for time and size together 
+ma_lrr_time_size_form <- as.formula(paste('lrr_richness', 
+                                                  rhs, 
+                                                  ' + log(mean_size_ha) * intervention_length + S_aggregation'))
+
+#Formula for temp and precip
+ma_lrr_climate_form <- as.formula(paste('lrr_richness', 
+                                        rhs, 
+                                        ' + mean_temp * mean_precip  + S_aggregation'))
+
+#Formula for abs latitude
+ma_lrr_lat_form <- as.formula(paste('lrr_richness', 
+                                        rhs, 
+                                        ' + abs(site_latitude_dd) + S_aggregation'))
+
+#Formula for zone
+ma_lrr_zone_form <- as.formula(paste('lrr_richness', 
+                                        rhs, 
+                                        ' + zone + S_aggregation'))
+
+
+#Formula for random slopes and intercepts and length of intervention
+ma_lrr_time_rs_form <- as.formula(paste('lrr_richness', 
+                                        "~ 1 + intervention_length + (1 + intervention_length | study_id) + S_aggregation"))
+#Formula for random slopes and intercepts and size of intervention
+ma_lrr_size_rs_form <- as.formula(paste('lrr_richness', 
+                                        "~ 1 + log(mean_size_ha)  + (1 + log(mean_size_ha)  | study_id) + S_aggregation"))
+
+
+
+# set weakly-informative priors for analysis
+ma_priors <- prior(normal(0, 1), class = "Intercept")+
+  prior(cauchy(0, 0.5), class = "sd")
+
+# set VERY weak priors to assess prior sensitivity
+ma_priors_sens <- prior(normal(0, 5), class = "Intercept")+
+  prior(cauchy(0, 1), class = "sd")
+
+# set sampling options
+set.seed(34953)
+cred_int <- c(0.91, 0.98)  # credible intervals to display
+bf_alpha <- 1 - cred_int[2]  # alpha used for Bayes Factor hypothesis tests
+niter <- 7500  # number of total samples to generate from posterior
+wup <- 2500  # number of warm-up samples for HMC-NUTS
+adelta <- 0.999  # adapt_delta parameter used during warm-up
+
+
+
+
+
+#################################################-
+## Function to read in and clean data
+## Calculate response ratios and variance
+## Deal with moderators
+#################################################-
+
+
+#Check how many studies were excluded for diffrent reasons
+study_excl_check <- function(fileName){
+
+  #Get name of intervention
+  fName <- strsplit(basename(fileName), ' ')[[1]][2]
+  
+  #Read each sheet 
+  studies <- as.data.frame(read_excel(fileName, sheet = 1, na = c("", "NA")))
+  colnames(studies) <- studies[1,]
+  studies <- studies[studies$study_id != 'study_id',]
+  
+  #Get original number of studies
+  total_studies <- unique(studies$study_id)
+  
+  #Number excluded for each reason
+  excl_no_biodiv <- studies[studies$include_in_biodiversity_analysis == 'N',]
+  print(c(i, length(total_studies)))
+  print(table(studies$study_fate))
+}
+
+#List all files 
+files <- list.files(file.path(data_dir, 'fromGoogle'), full.names = T)
+
+#Loop through files
+for(i in files){
+  study_excl_check(i)
+}
+
+
+
+
+
+#Read in and merge data, do some basic cleaning
+pre_process <- function(fileName){
+
+  
+  #Get name of intervention
+  fName <- strsplit(basename(fileName), ' ')[[1]][2]
+  
+  #Read each sheet 
+  studies <- as.data.frame(read_excel(fileName, sheet = 1, na = c("", "NA")))
+  biodiv <- as.data.frame(read_excel(fileName, sheet = 2, na = c("", "NA")))
+  moderators <-as.data.frame(read_excel(fileName, sheet = 3, na = c("", "NA")))
+  
+  #Deal with headers
+  colnames(studies) <- studies[1,]
+  colnames(biodiv) <- biodiv[1,]
+  colnames(moderators) <- moderators[1,]
+  studies <- studies[studies$study_id != 'study_id',]
+  biodiv <- biodiv[biodiv$study_id != 'study_id',]
+  moderators <- moderators[moderators$study_id != 'study_id',]
+  
+  
+  #deal with forestation 3.0
+  if(fName == 'forestation'){
+    studies2 <- as.data.frame(read_excel(file.path(data_dir, '2024 forestation3.0.xlsx'), sheet = 1, na = c("", "NA")))
+    biodiv2 <- as.data.frame(read_excel(file.path(data_dir, '2024 forestation3.0.xlsx'),, sheet = 2, na = c("", "NA")))
+    moderators2 <-as.data.frame(read_excel(file.path(data_dir, '2024 forestation3.0.xlsx'),, sheet = 3, na = c("", "NA")))
+    
+    #Deal with headers
+    colnames(studies2) <- studies2[1,]
+    colnames(biodiv2) <- biodiv2[1,]
+    colnames(moderators2) <- moderators2[1,]
+    studies2 <- studies2[studies2$study_id != 'study_id',]
+    biodiv2 <- biodiv2[moderators2$study_id != 'study_id',]
+    moderators2 <- moderators2[moderators2$study_id != 'study_id',]
+    
+    #Get studies with shared study_id in the biodiv tab
+    shared_ids <- unique(intersect(biodiv$study_id, biodiv2$study_id))
+    
+    #Get study ids that only occur in biodiv tab for studies 1
+    unique_ids_1 <- unique(setdiff(biodiv$study_id, shared_ids))
+    
+    #Do the same but for studies2
+    unique_ids_2 <- unique(setdiff(biodiv2$study_id, shared_ids))
+    
+    #Insert 'duplicated' as the 2nd column in studies and fill with NA
+    studies$duplicated <- NA
+    studies <- studies[, c(1, ncol(studies), 2:(ncol(studies)-1))]
+    studies$duplicated <- NA
+    
+    #Create dataframes for studies, biodiv, and moderators which include values from 2 if it is shared, but if it is only in 1 include those values
+    studies <- rbind(studies[studies$study_id %in% unique_ids_1,],
+                     studies2[studies2$study_id %in% unique_ids_2,],
+                     studies2[studies2$study_id %in% shared_ids,])
+    biodiv <- rbind(biodiv[biodiv$study_id %in% unique_ids_1,],
+                    biodiv2[biodiv2$study_id %in% unique_ids_2,],
+                    biodiv2[biodiv2$study_id %in% shared_ids,])
+    moderators <- rbind(moderators[moderators$study_id %in% unique_ids_1,],
+                        moderators2[moderators2$study_id %in% unique_ids_2,],
+                        moderators2[moderators2$study_id %in% shared_ids,])
+    
+    
+    
+    
+  }
+  
+  
+  
+  
+  #Drop no data rows
+  biodiv <- biodiv[!is.na(biodiv$study_id),]
+  
+  #Combine biodiversity data with moderator data
+  #Set up holding data frame
+  fullDF <- data.frame()
+  
+  #Loop through each row
+  for(i in 1:nrow(biodiv)) {
+    datarow <- biodiv[i,]
+    
+    #Get study ID
+    study_uid <- datarow$study_id
+    
+    #Add in paper info associated with that study ID
+    datarow <- cbind(studies[studies$study_id == study_uid,], datarow)
+    
+    #Get biodiv identifier
+    obs_id <- datarow$observation_id
+    
+    #FUTURE CHECK
+    #skipping study with missing moderators for now
+    if(study_uid != 'Zahawi2013journalofappliedecology'){
+      
+      
+      #List possible matches 
+      moderator_ids <- moderators[moderators$study_id == study_uid,]
+      
+      #Deal with cases where the moderators apply to all observations 
+      #FUTURE CHECK
+      #Return to cases where 'all' is entered multiple times
+      if(moderator_ids$observation_id[1] == 'all'){
+        datarow <- cbind(datarow, head(moderators[moderators$study_id == study_uid,], 1))
+      
+      #Deal with other cases   
+      }else{
+        
+        #Get the list of all the observations IDs
+        observation_id_list <-  (strsplit(moderator_ids$observation_id, ','))
+        
+        
+        # Find the maximum length of elements in the list
+        max_length <- max(sapply(observation_id_list, length))
+        
+        # Standardize the list by padding shorter elements with NA
+        standardized_list <- lapply(observation_id_list, function(x) {
+          length(x) <- max_length
+          return(x)
+        })
+        
+        # Convert to a dataframe
+        df <- as.data.frame(do.call(rbind, standardized_list), stringsAsFactors = FALSE)
+        df <- data.frame(lapply(df, as.numeric))
+        
+        
+        #FUTURE CHECK
+        #Return to cases where the same moderator value is entered multiple times
+        #Match biodiv observation to moderator ID
+        rows_with_id <- apply(df, 1, function(row) any(row == as.numeric(obs_id), na.rm = TRUE))
+        
+        # Subset the dataframe
+        df_filtered <- df[rows_with_id, , drop = FALSE]
+        
+        #Combine with biodiv data
+        datarow <- cbind(datarow, moderator_ids[as.numeric(row.names(df_filtered)[1]),])
+        
+      }
+      
+  
+      
+      #Reset rowname 
+      row.names(datarow) <- i
+      
+      #Add to full dataframe
+      fullDF <- rbind(fullDF, datarow)
+      
+      
+    }
+  }
+  
+  #Calculate response ratios
+  #Log response ratios - summed sites
+  rows_sum <- which(fullDF[,'S_aggregation'] == 'summed')
+  fullDF$lrr_richness_sum <- NA
+  fullDF[rows_sum, 'lrr_richness_sum'] <- lrr(as.numeric(fullDF[rows_sum, 'S_intervention']), 
+                                              as.numeric(fullDF[rows_sum, 'S_reference']))
+  
+  #Log response ratio - mean across sites
+  rows_mean <- which(fullDF[,'S_aggregation'] == 'mean ± uncert')
+  fullDF$lrr_richness_mean <- NA
+  fullDF[rows_mean, 'lrr_richness_mean'] <- lrr(as.numeric(fullDF[rows_mean, 'S_intervention']), 
+                                                as.numeric(fullDF[rows_mean, 'S_reference']))
+  
+  
+  #Log ratio without separating sum and mean
+  fullDF$lrr_richness <- lrr(as.numeric(fullDF[, 'S_intervention']), 
+                             as.numeric(fullDF[, 'S_reference']))
+  
+  
+  
+  #WIND AND SOLAR FIX COLUMN NAME
+  if(fName %in% c('solar', 'wind')){
+    fullDF$reps_per_patch_intervention <- fullDF$replicates_intervention
+    fullDF$reps_per_patch_reference <- fullDF$replicates_reference
+    
+    fullDF$patches_intervention <- fullDF$replicates_intervention
+    fullDF$patches_reference <- fullDF$replicates_reference
+  }
+  
+  
+  #Figure out sample size
+  #FUTURE CHECK - patches vs reps???
+  fullDF$N_int <- pmax(as.numeric(fullDF$reps_per_patch_intervention), 
+                       as.numeric(fullDF$patches_intervention), na.rm = T)
+  fullDF$N_ref <- pmax(as.numeric(fullDF$reps_per_patch_reference), 
+                       as.numeric(fullDF$patches_reference), na.rm = T)
+  
+  #Set columns and fill with NA values for variance values
+  fullDF$var_int <- NA
+  fullDF$var_ref <- NA
+  
+  #Change variance type to match function labels
+  #FUTURE CHECK - other types of variance (boxplots, etc)
+  fullDF$var_ref <- unlist(lapply(1:nrow(fullDF), function(x) uncert_to_s2(fullDF$S_uncert_reference[x], 
+                                                                    fullDF$uncert_type[x], 
+                                                                    fullDF$N_ref[x])))
+  fullDF$var_int <- unlist(lapply(1:nrow(fullDF), function(x) uncert_to_s2(fullDF$S_uncert_intervention[x], 
+                                                                    fullDF$uncert_type[x], 
+                                                                    fullDF$N_int[x])))
+  
+
+  #Deal with boxplots
+  #Skip for wind (no boxplots)
+  #FUTURE CHECK - check for validity ( https://doi.org/10.1177/0962280216669183)
+  if(fName != 'wind'){
+  
+    fullDF$Min_intervention <- as.numeric(fullDF$Min_intervention)
+    fullDF$Lower_quartile_intervention <- as.numeric(fullDF$Lower_quartile_intervention)
+    fullDF$Median_intervention <- as.numeric(fullDF$Median_intervention)
+    fullDF$Upper_quartile_intervention <- as.numeric(fullDF$Upper_quartile_intervention)
+    fullDF$Max_intervention <- as.numeric(fullDF$Max_intervention)
+    
+    fullDF$Min_reference <- as.numeric(fullDF$Min_reference)
+    fullDF$Lower_quartile_reference <- as.numeric(fullDF$Lower_quartile_reference)
+    fullDF$Median_reference <- as.numeric(fullDF$Median_reference)
+    fullDF$Upper_quartile_reference <- as.numeric(fullDF$Upper_quartile_reference)
+    fullDF$Max_reference <- as.numeric(fullDF$Max_reference)
+    
+    
+    
+    fullDF$est_mean_int <- (fullDF$Min_intervention + fullDF$Max_intervention +
+                            2 * (fullDF$Lower_quartile_intervention + fullDF$Upper_quartile_intervention) +
+                            2 * (fullDF$Median_intervention))
+    
+    fullDF$est_mean_ref <- (fullDF$Min_reference + fullDF$Max_reference +
+                              2 * (fullDF$Lower_quartile_reference + fullDF$Upper_quartile_reference) +
+                              2 * (fullDF$Median_reference))
+    
+    fullDF$est_var_int <- ((fullDF$Upper_quartile_intervention - fullDF$Lower_quartile_intervention) / 1.35) ** 2
+    
+    fullDF$est_var_ref <- ((fullDF$Upper_quartile_reference - fullDF$Lower_quartile_reference) / 1.35) ** 2
+    
+    #FUTURE CHECK
+    #Code this better later 
+    for(i in 1:nrow(fullDF)){
+      if(!is.na(fullDF[i, 'uncert_type'])){
+        if(fullDF[i, 'uncert_type'] == 'boxplot'){
+          fullDF[i, 'var_int'] <- fullDF[i, 'est_var_int']
+          fullDF[i, 'var_ref'] <- fullDF[i, 'est_var_ref']
+          if(is.na(fullDF[i, 'S_intervention'])){
+            fullDF[i, 'S_intervention'] <- fullDF[i, 'Median_intervention']
+          }
+          if(is.na(fullDF[i, 'S_reference'])){
+            fullDF[i, 'S_reference'] <- fullDF[i, 'Median_reference']
+          }
+        }
+      }
+    }
+  }
+  
+  
+  #Calculate other log response ratios 
+  fullDF$lrr_se_richness = lrr_se(xbar_int = as.numeric(fullDF$S_intervention),
+                                   xbar_ref = as.numeric(fullDF$S_reference),
+                                   n_int = fullDF$N_int, n_ref = fullDF$N_ref,
+                                   var_int = fullDF$var_int, var_ref = fullDF$var_ref)
+  
+  fullDF$lrrD_richness_mean = lrrDelta(xbar_int = as.numeric(fullDF$S_intervention),
+                                        xbar_ref = as.numeric(fullDF$S_reference),
+                                        n_int = fullDF$N_int, n_ref = fullDF$N_ref,
+                                        var_int = fullDF$var_int, var_ref = fullDF$var_ref)
+  
+  fullDF$lrrD_se_richness_mean = lrrDelta_se(xbar_int = as.numeric(fullDF$S_intervention),
+                                              xbar_ref = as.numeric(fullDF$S_reference),
+                                              n_int = fullDF$N_int, n_ref = fullDF$N_ref,
+                                              var_int = fullDF$var_int, var_ref = fullDF$var_ref)
+  
+  fullDF$geary_int = geary_test(xbar = as.numeric(fullDF$S_intervention), sd = fullDF$var_int^2,
+                                 n = fullDF$N_int, passfail = TRUE)
+  
+  fullDF$geary_ref = geary_test(xbar = as.numeric(fullDF$S_reference), sd = fullDF$var_ref^2,
+                                 n = fullDF$N_ref, passfail = TRUE)
+  
+  
+  
+  
+  #Deal with moderator variables
+  
+  #Intervention size
+  #FUTURE CHECK - other units, ranges, reference size?
+  area_range <- as.data.frame(str_split_fixed(fullDF$area_intervention, '-', 2))
+  colnames(area_range) <- c('y1', 'y2')
+  area_range$y1 <- as.numeric(area_range$y1)
+  area_range$y2 <- as.numeric(area_range$y2)
+  area_range$mean_y <- rowMeans(area_range, na.rm = T)
+  
+  fullDF$mean_size <- area_range$mean_y 
+  
+  
+  fullDF$mean_size_ha <- unlist(lapply(1:nrow(fullDF), function(x) convert_area(fullDF$mean_size[x], 
+                                                                                fullDF$area_units[x])))
+  
+ 
+  
+  #Intervention age 
+  #FUTURE CHECK - Update to just not use midpoint of time range
+  start_times <- as.data.frame(str_split_fixed(fullDF$year_intervention_applied, '-', 2))
+  colnames(start_times) <- c('y1', 'y2')
+  start_times$y1 <- as.numeric(start_times$y1)
+  start_times$y2 <- as.numeric(start_times$y2)
+  start_times$mean_y <- rowMeans(start_times, na.rm = T)
+  
+  end_times <- as.data.frame(str_split_fixed(fullDF$year_survey_start, '-', 2))
+  colnames(end_times) <- c('y1', 'y2')
+  end_times$y1 <- as.numeric(end_times$y1)
+  end_times$y2 <- as.numeric(end_times$y2)
+  end_times$mean_y <- rowMeans(end_times, na.rm = T)
+  
+  fullDF$intervention_length <-  end_times$mean_y - start_times$mean_y
+  
+  rownames(fullDF) <- c(1:nrow(fullDF))
+
+
+  
+  fullDF$taxa_grouped <- taxa_dict[fullDF$surveyed_taxon]
+  
+  
+  
+  #Link to biomes
+  coord_df <- as.matrix(fullDF[,c('site_longitude_dd', 'site_latitude_dd')])
+  coord_df <- vect(coord_df, type="points", atts=NULL, crs="+proj=longlat +datum=WGS84")
+
+
+  coord_df_ex <- terra::extract(ecoregions, coord_df)
+
+  fullDF <- cbind(fullDF, coord_df_ex)
+  fullDF$forested <- 'N'
+  fullDF[fullDF$BIOME_NUM %in% c(1,2,3,4, 5, 6, 14), 'forested'] <- 'Y'
+  
+  fullDF$site_latitude_dd <- as.numeric(fullDF$site_latitude_dd)
+  fullDF$site_longitude_dd <- as.numeric(fullDF$site_longitude_dd)
+  
+  fullDF <- fullDF[!is.na(fullDF$site_latitude_dd),]
+  
+  fullDF$mean_temp <- terra::extract((temp), fullDF[,c('site_longitude_dd', 'site_latitude_dd')])$wc2.1_30s_bio_1
+  fullDF$mean_precip <- terra::extract((precip), fullDF[,c('site_longitude_dd', 'site_latitude_dd')])$wc2.1_30s_bio_12
+  
+  fullDF$zone <- 'temperate'
+  fullDF[abs(fullDF$site_latitude_dd) < 23.5, 'zone'] <- 'tropical'
+  
+  
+  toSelect <- c('study_id', 'observation_id',  
+                'S_reference', 'S_intervention', 'N_int', 'N_ref',
+                'S_aggregation', 'S_uncert_reference', 'S_uncert_intervention',
+                'uncert_type', 'var_int', 'var_ref',
+                'lrr_richness', 'lrr_richness_sum', 'lrr_richness_mean',
+                'lrr_se_richness', 'lrrD_richness_mean', 'lrrD_se_richness_mean', 
+                'geary_int', 'geary_ref',
+                'year_intervention_applied', 'year_survey_start',
+                'area_intervention', 'area_reference', 'area_units',
+                'intervention_length', 'mean_size_ha', 
+                'BIOME_NAME', 
+                'forested', 
+                'taxa_grouped',
+                'site_longitude_dd', 'site_latitude_dd',
+                'mean_temp', 'mean_precip', 'zone')
+  
+  if(fName == 'forestation'){
+    toSelect <- c(toSelect, 'forestation_type', 'forest_type')
+  }
+  fullDF <- fullDF[,toSelect]
+  write.csv(fullDF, file.path(data_dir, 'augmented', paste(fName, '.csv', sep = '')))
+
+  if(fName == 'forestation'){
+      subDF <- fullDF[which(fullDF$forestation_type == 'aforestation'),]
+      write.csv(subDF, file.path(data_dir, 'augmented', paste('aforestation', '.csv', sep = '')))
+      subDF <- fullDF[which(fullDF$forestation_type == 'reforestation'),]
+      write.csv(subDF, file.path(data_dir, 'augmented', paste('reforestation', '.csv', sep = '')))
+  
+      subDF <- fullDF[which(fullDF$forest_type == 'timber plantation'),]
+      write.csv(subDF, file.path(data_dir, 'augmented', paste('plantation', '.csv', sep = '')))
+      
+      subDF <- fullDF[which(fullDF$forest_type == 'natural forest restoration'),]
+      write.csv(subDF, file.path(data_dir, 'augmented', paste('nfr', '.csv', sep = '')))
+      
+    }
+  
+
+}
+
+library(geodata)
+clim_data <- worldclim_global('bio', 0.5, path = tempdir())
+temp <- clim_data$wc2.1_30s_bio_1
+precip <- clim_data$wc2.1_30s_bio_12
+
+
+#Read in ecoregions to link observations to biome
+ecoregions <- vect(file.path(data_dir, 'Ecoregions2017', 'Ecoregions2017.shp'))
+
+# Read in your taxa classification CSV
+df <- read.csv(file.path(data_dir, "taxa_names.csv"))
+taxa_dict <- setNames(df$group, df$taxon)
+
+#Loop through and process each file
+for(file_index in files){
+  pre_process(file_index)
+}
+
+
+
+
+
+
+# Function to check for outliers based on IQR
+
+check_outliers <- function(df, column, condition_column = NULL) {
+  Q1 <- quantile(df[[column]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(df[[column]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  if (!is.null(condition_column)) {
+    df %>%
+      mutate(!!paste(column, "outlier", sep = "_") := if_else((df[[column]] < lower_bound | df[[column]] > upper_bound) & !is.na(df[[condition_column]]), "Failed", "Passed"))
+  } else {
+    df %>%
+      mutate(!!paste(column, "outlier", sep = "_") := if_else(df[[column]] < lower_bound | df[[column]] > upper_bound, "Failed", "Passed"))
+  }
+}
+
+
+# Function to check for inconsistent formats
+check_format <- function(df, column, pattern) {
+  df %>%
+    mutate(!!paste(column, "format_issue", sep = "_") := if_else(!grepl(pattern, df[[column]], perl = TRUE), "Failed", "Passed"))
+}
+
+
+check_missing <- function(df, column, condition_column = NULL) {
+  if (!is.null(condition_column)) {
+    df %>%
+      mutate(!!paste(column, "missing_value", sep = "_") := if_else(is.na(df[[column]]) & !is.na(df[[condition_column]]), "Failed", "Passed"))
+  } else {
+    df %>%
+      mutate(!!paste(column, "missing_value", sep = "_") := if_else(is.na(df[[column]]), "Failed", "Passed"))
+  }
+}
+
+
+# Function to check for potential errors in the dataset
+check_data_errors <- function(df) {
+  df <- check_outliers(df, "S_reference")
+  df <- check_outliers(df, "S_intervention")
+  df <- check_outliers(df, "N_int")
+  df <- check_outliers(df, "N_ref")
+  df <- check_outliers(df, "var_int", "uncert_type")
+  df <- check_outliers(df, "var_ref", "uncert_type")
+  df <- check_format(df, "year_intervention_applied", "^\\d{4}(\\.0)?(-\\d{4}(\\.0)?)?$")
+  df <- check_format(df, "year_survey_start", "^\\d{4}(\\.0)?(-\\d{4}(\\.0)?)?$")
+  df <- check_format(df, "area_intervention", "^\\d+(-\\d+)?$")
+  df <- check_format(df, "area_units", "^(hectares|kilometers squared|kilometer radius|meters squares|meters squared|square meters|hectometers squared|square kilometers|kilometers squares|centimeters squared|acres)$")
+  df <- check_missing(df, "study_id")
+  df <- check_missing(df, "observation_id")
+  df <- check_missing(df, "S_reference")
+  df <- check_missing(df, "S_intervention")
+  df <- check_missing(df, "N_int")
+  df <- check_missing(df, "N_ref")
+  df <- check_missing(df, "var_int", "uncert_type")
+  df <- check_missing(df, "var_ref", "uncert_type")
+  df
+}
+
+
+
+
+# Function to extract rows that failed any test using base R
+extract_failed_rows <- function(df) {
+  error_columns <- grep("_outlier$|_format_issue$|_missing_value$", names(df), value = TRUE)
+  failed_rows <- data.frame()
+  
+  for (col in error_columns) {
+    failed <- df[df[[col]] == "Failed" | is.na(df[[col]]), c("unique_id",  col)]
+    if (nrow(failed) > 0) {
+      failed$error_type <- col
+      failed$failed_value <- df[df[[col]] == "Failed" | is.na(df[[col]]), gsub("(_outlier|_format_issue|_missing_value)$", "", col)]
+      names(failed) <- c('unique_id',  'test_status', 'test_name', 'original_value')
+      failed_rows <- rbind(failed_rows, failed)
+    }
+  }
+  
+ 
+  return(failed_rows)
+}
+
+
+interventions <- c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 'wetland_restoration-coastal',
+                   'agroforestry', 'aforestation', 'beccs', 'solar', 'wind')
+
+
+for(intervention in interventions){
+  df <- read.csv(file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = '')), row.names = 1)%>%
+    mutate(unique_id = row_number())
+
+  # Check for data errors
+  df_with_errors <- check_data_errors(df)
+  
+  # Extract rows that failed any test
+  failed_rows <- extract_failed_rows(df_with_errors)
+  
+  # Print the dataframe with failed rows
+  print(failed_rows)
+  
+}
+
+
+
+#Named list of data frames to check
+check_2_outside_df <-list()
+  
+#Check if lrr is +/- from mean lrr
+for(intervention in interventions){
+  
+  #Read in augmented file
+  df <- read.csv(file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = '')), row.names = 1)
+  
+  print(intervention)
+  print(length(unique(df$study_id)))
+  
+  sub_df <- df[!is.na(df$lrr_richness),]
+  sub_df <- sub_df[sub_df$lrr_richness != Inf,]
+  sub_df <- sub_df[sub_df$lrr_richness != -Inf,]
+  
+  #calculate mean lrr
+  mean_lrr <- mean(sub_df$lrr_richness, na.rm = T)
+  
+  #Subset dataframe to those with mean_lrr 2 greater than or less than mean
+  toCheck <- df[(abs(df$lrr_richness) - mean_lrr) > 1.38,]
+  
+  #Drop na
+  toCheck <- toCheck[!is.na(toCheck$study_id),]
+  check_2_outside_df[[intervention]] <- toCheck
+  
+}
+
+
+
+
+
+
+#Run meta analyses 
+meta_analysis <- function(intervention){
+  
+  #Try to make results dir 
+  dir.create(file.path(result_dir, intervention), showWarnings = FALSE)
+  
+  #Read in augmented file
+  fullDF <- read.csv(file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = '')), row.names = 1)
+  
+  print(length(unique(fullDF$study_id)))
+  fullDF$equal_N <- F
+  fullDF[fullDF$N_int == fullDF$N_ref, 'equal_N'] <- T
+  
+  
+  sub_df <- fullDF[!is.na(fullDF$lrr_richness),]
+  sub_df <- sub_df[sub_df$lrr_richness != Inf,]
+  sub_df <- sub_df[sub_df$lrr_richness != -Inf,]
+  print(nrow(sub_df))
+
+  sub_df$var_int[sub_df$var_int == Inf] <- NA
+  sub_df$var_ref[sub_df$var_int == Inf] <- NA
+
+  sub_df$var_int[sub_df$var_ref == Inf] <- NA
+  sub_df$var_ref[sub_df$var_ref == Inf] <- NA
+
+  
+  sub_df$S_aggregation <- str_replace(sub_df$S_aggregation,
+                                      "mean ± uncert",
+                                      "mean")
+  
+  sub_df <- sub_df[sub_df$S_aggregation %in% c('mean', 'summed'),]
+  
+  
+  
+  toDrop <- sub_df[sub_df$S_aggregation == 'summed',]
+  try(toDrop <- row.names(toDrop[toDrop$equal_N == F,]))
+  
+  sub_df <- sub_df[!(row.names(sub_df) %in% toDrop), ]
+  
+  
+  ma_both <- brm(ma_both_form, data = sub_df, prior = ma_priors,
+                    cores = 4, sample_prior = "yes", warmup = wup,
+                    iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_both), file.path(result_dir, intervention, 'pooled_posterior.csv'))
+
+
+
+  ma_sum_aff <- brm(ma_sum_form, data = sub_df, prior = ma_priors,
+                    cores = 4, sample_prior = "yes", warmup = wup,
+                    iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_sum_aff), file.path(result_dir, intervention, 'sum_posterior.csv'))
+
+
+
+
+  ma_avg <- brm(ma_mean_uw_form, data = sub_df, prior = ma_priors,
+                  cores = 4, sample_prior = "yes", warmup = wup,
+                  iter = niter, control = list(adapt_delta = adelta))
+
+  write.csv(posterior_samples(ma_avg), file.path(result_dir, intervention, 'mean_posterior.csv'))
+
+
+  ma_w_avg <- brm(ma_mean_w_form, data = sub_df[sub_df$lrr_se_richness < 5,], prior = ma_priors,
+                  cores = 4, sample_prior = "yes", warmup = wup,
+                  iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_w_avg), file.path(result_dir, intervention, 'mean_w_posterior.csv'))
+
+  ma_lrr_time <- brm(ma_lrr_time_form, data = sub_df, prior = ma_priors,
+                          cores = 4, sample_prior = "yes", warmup = wup,
+                          iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_lrr_time), file.path(result_dir, intervention, 'time_posterior.csv'))
+
+  ma_lrr_size <- brm(ma_lrr_size_form, data = sub_df, prior = ma_priors,
+                       cores = 4, sample_prior = "yes", warmup = wup,
+                       iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_lrr_size), file.path(result_dir, intervention, 'size_posterior.csv'))
+
+
+
+
+  ma_taxa <- brm(ma_lrr_taxa_form, data = sub_df, prior = ma_priors,
+                     cores = 4, sample_prior = "yes", warmup = wup,
+                     iter = niter, control = list(adapt_delta = adelta))
+
+  write.csv(posterior_samples(ma_taxa), file.path(result_dir, intervention, 'taxa_posterior.csv'))
+
+
+
+
+  ma_time_size <- brm(ma_lrr_time_size_form, data = sub_df, prior = ma_priors,
+                     cores = 4, sample_prior = "yes", warmup = wup,
+                     iter = niter, control = list(adapt_delta = adelta))
+
+  write.csv(posterior_samples(ma_time_size), file.path(result_dir, intervention, 'time_size_posterior.csv'))
+
+
+  ma_forested <- brm(ma_lrr_forest_form, data = sub_df, prior = ma_priors,
+                  cores = 4, sample_prior = "yes", warmup = wup,
+                  iter = niter, control = list(adapt_delta = adelta))
+
+
+  write.csv(posterior_samples(ma_forested), file.path(result_dir, intervention, 'forested_posterior.csv'))
+
+
+
+  #Do climate meta
+  sub_df$mean_precip <- sub_df$mean_precip / 100
+  ma_climate <- brm(ma_lrr_climate_form, data = sub_df, prior = ma_priors,
+                    cores = 4, sample_prior = "yes", warmup = wup,
+                    iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_climate), file.path(result_dir, intervention, 'climate_posterior.csv'))
+
+  #Do zone meta
+  ma_zone <- brm(ma_lrr_zone_form, data = sub_df, prior = ma_priors,
+                   cores = 4, sample_prior = "yes", warmup = wup,
+                   iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_zone), file.path(result_dir, intervention, 'zone_posterior.csv'))
+
+  #Do lat meta
+  ma_lat <- brm(ma_lrr_lat_form, data = sub_df, prior = ma_priors,
+                  cores = 4, sample_prior = "yes", warmup = wup,
+                  iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_lat), file.path(result_dir, intervention, 'lat_posterior.csv'))
+
+
+  #Run models with random slopes
+  ma_lrr_time_rs <- brm(ma_lrr_time_rs_form, data = sub_df, prior = ma_priors,
+                    cores = 4, sample_prior = "yes", warmup = wup,
+                    iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_lrr_time_rs), file.path(result_dir, intervention, 'time_rs_posterior.csv'))
+
+  ma_lrr_size_rs <- brm(ma_lrr_size_rs_form, data = sub_df, prior = ma_priors,
+                    cores = 4, sample_prior = "yes", warmup = wup,
+                    iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_lrr_size_rs), file.path(result_dir, intervention, 'size_rs_posterior.csv'))
+
+}
+meta_analysis('aforestation')
+meta_analysis('agroforestry')
+meta_analysis('beccs')
+meta_analysis('forestation')
+meta_analysis('grassland_restoration')
+meta_analysis('reforestation')
+meta_analysis('solar')
+meta_analysis('wetland_restoration-coastal')
+meta_analysis('wetland_restoration-inland')
+meta_analysis('wind')
+meta_analysis('plantation')
+meta_analysis('nfr') 
+
+
+#Meta analysis test
+#Compare mean vs mean w/ weighting for studies including variance
+
+meta_analysis_test <- function(intervention){
+  
+  #Try to make results dir 
+  dir.create(file.path(result_dir, intervention), showWarnings = FALSE)
+  
+  #Read in augmented file
+  fullDF <- read.csv(file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = '')), row.names = 1)
+  
+  sub_df <- fullDF[fullDF$S_aggregation == "mean ± uncert",] 
+  
+  sub_df <- sub_df[!is.na(fullDF$lrr_richness),]
+  sub_df <- sub_df[sub_df$lrr_richness != Inf,]
+  sub_df <- sub_df[sub_df$lrr_richness != -Inf,]
+  print(nrow(sub_df))
+  
+  ma_avg <- brm(ma_mean_uw_form, data = sub_df, prior = ma_priors,
+                  cores = 4, sample_prior = "yes", warmup = wup,
+                  iter = niter, control = list(adapt_delta = adelta))
+
+  write.csv(posterior_samples(ma_avg), file.path(result_dir, intervention, 'mean_posterior_test.csv'))
+
+
+  ma_w_avg <- brm(ma_mean_w_form, data = sub_df[sub_df$lrr_se_richness < 5,], prior = ma_priors,
+                  cores = 4, sample_prior = "yes", warmup = wup,
+                  iter = niter, control = list(adapt_delta = adelta))
+  write.csv(posterior_samples(ma_w_avg), file.path(result_dir, intervention, 'mean_w_posterior_test.csv'))
+
+ 
+}
+meta_analysis_test('aforestation')
+meta_analysis_test('agroforestry')
+meta_analysis_test('beccs')
+meta_analysis_test('forestation')
+meta_analysis_test('grassland_restoration')
+meta_analysis_test('reforestation')
+meta_analysis_test('solar')
+meta_analysis_test('wetland_restoration-coastal')
+meta_analysis_test('wetland_restoration-inland')
+meta_analysis_test('wind')
+
+
+
+
+#Create main figure
+plotDF <- data.frame()
+interventions <- c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 'wetland_restoration-coastal',
+                   'agroforestry', 'aforestation', 'beccs', 'solar', 'wind')
+for(i in interventions){
+
+  subDF_mean <- read.csv(file.path(result_dir, i, 'mean_posterior.csv'))
+  subDF_sum <- read.csv(file.path(result_dir, i, 'sum_posterior.csv'))
+  subDF_both <- read.csv(file.path(result_dir, i, 'pooled_posterior.csv'))
+  
+  toBind1 <- as.data.frame(cbind(subDF_mean$b_Intercept, i, 'mean'))
+  colnames(toBind1) <- c('Value', 'Intervention', 'Method')
+  toBind1$Value <- as.numeric(toBind1$Value)
+
+  toBind2 <- as.data.frame(cbind(subDF_sum$b_Intercept, i, 'sum'))
+  colnames(toBind2) <- c('Value', 'Intervention', 'Method')
+  toBind2$Value <- as.numeric(toBind2$Value)
+  
+  toBind3 <- as.data.frame(cbind(subDF_both$b_Intercept, i, 'pooled'))
+  colnames(toBind3) <- c('Value', 'Intervention', 'Method')
+  toBind3$Value <- as.numeric(toBind3$Value)
+  
+  plotDF <- rbind(plotDF, toBind1, toBind2, toBind3)
+}
+
+
+colnames(plotDF) <- c('Value', 'Intervention', 'Method')
+plotDF$Value <- exp(as.numeric(plotDF$Value))
+
+plotDF2 <- plotDF
+plotDF2 <- plotDF2[plotDF2$Value < 4,]
+plotDF2 <- plotDF2[plotDF2$Value > 0.25,]
+
+
+
+plotDF2[plotDF2 == 'wind'] <- 'Wind'
+plotDF2[plotDF2 == 'grassland_restoration'] <- 'Grassland restoration'
+plotDF2[plotDF2 == 'reforestation'] <- 'Reforestation'
+plotDF2[plotDF2 == 'aforestation'] <- 'Afforestation'
+plotDF2[plotDF2 == 'solar'] <- 'Solar'
+plotDF2[plotDF2 == 'beccs'] <- 'Bioenergy crops'
+plotDF2[plotDF2 == 'agroforestry'] <- 'Agroforestry'
+plotDF2[plotDF2 == 'wetland_restoration-coastal'] <- 'Coastal wetland restoration'
+plotDF2[plotDF2 == 'wetland_restoration-inland'] <- 'Inland wetland restoration'
+
+plotDF2[plotDF2 == 'sum'] <- 'Aggregated'
+plotDF2[plotDF2 == 'mean'] <- 'Mean'
+plotDF2[plotDF2 == 'pooled'] <- 'Pooled'
+
+
+# Summarize for plotting
+summaryDF <- plotDF2 %>%
+  group_by(Intervention, Method) %>%
+  summarise(
+    Median = median(Value, na.rm = TRUE),
+    Min = quantile(Value, 0.025, na.rm = TRUE),
+    Max = quantile(Value, 0.975, na.rm = TRUE),
+    Q1 = quantile(Value, 0.1, na.rm = TRUE),
+    Q3 = quantile(Value, 0.9, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+
+method_colors <- c("Mean" = "red4", "Aggregated" = "darkgreen", "Pooled" = 'dodgerblue4')
+
+
+
+a <- ggplot(summaryDF, aes(y = Intervention, x = Median, color = Method)) +
+  geom_point(size = 5, position = position_dodge(width = 0.5)) +
+  
+  # Thin line: min to max
+  geom_linerange(aes(xmin = Min, xmax = Max), size = 0.5, position = position_dodge(width = 0.5)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = Q1, xmax = Q3), size = 2, position = position_dodge(width = 0.5)) + 
+  # Median point
+  scale_color_manual(values = method_colors) +
+  theme_classic() +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.25, 0.5, 1, 2, 4),
+                     labels = c('1/4', '1/2', '1', '2', '4')) +
+  scale_y_discrete(limits = c('Solar', 'Wind', 'Bioenergy crops', 'Afforestation', 'Agroforestry',
+                              'Coastal wetland restoration', 'Inland wetland restoration', 'Grassland restoration', 'Reforestation')) + 
+  geom_vline(xintercept = 1, lty = 3) +
+  
+  xlab('X-fold change in species richness') +
+  ylab('') +
+  theme(text = element_text(size=20),
+        legend.position = c(0.89,0.92),
+        legend.background = element_rect(color = "black", size = 0.5),
+        legend.text.align = 0)  +
+  coord_cartesian( xlim = c(0.25,4)) 
+
+
+fPath <- file.path(figure_dir, 'mainEffect.png')
+png(fPath, width = 12, height = 8, units = 'in', res = 600)
+par(mar=c(1,1,1,1))
+print(a)
+dev.off()
+
+
+a <- ggplot(summaryDF[summaryDF$Method=='Pooled',], aes(y = Intervention, x = Median, color = Method)) +
+  geom_point(size = 5, position = position_dodge(width = 0.5)) +
+  
+  # Thin line: min to max
+  geom_linerange(aes(xmin = Min, xmax = Max), size = 0.5, position = position_dodge(width = 0.5)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = Q1, xmax = Q3), size = 2, position = position_dodge(width = 0.5)) + 
+  # Median point
+  scale_color_manual(values = method_colors) +
+  theme_classic() +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.33, 0.5, 0.75, 1, 1.5, 2, 3),
+                     labels = c('1/3', '1/2', '3/4', '1', '1.5', '2', '3')) +
+  scale_y_discrete(limits = c('Solar', 'Wind', 'Bioenergy crops', 'Afforestation', 'Agroforestry',
+                              'Coastal wetland restoration', 'Inland wetland restoration', 'Grassland restoration', 'Reforestation')) + 
+  geom_vline(xintercept = 1, lty = 3) +
+  
+  xlab('X-fold change in species richness') +
+  ylab('') +
+  theme(text = element_text(size=20),
+        legend.position = 'none')  +
+  coord_cartesian( xlim = c(0.33,3)) 
+
+fPath <- file.path(figure_dir, 'mainEffect_pooled.png')
+png(fPath, width = 12, height = 8, units = 'in', res = 600)
+par(mar=c(1,1,1,1))
+print(a)
+dev.off()
+
+
+
+
+
+
+plot_labels <- c(
+  "reforestation"="Reforestation", 
+  "grassland_restoration"="Grassland restoration", 
+  "wetland_restoration-inland"="Inland wetland restoration",
+  "wetland_restoration-coastal"="Coastal wetland restoration", 
+  "agroforestry"="Agroforestry", 
+  "aforestation"="Afforestation",
+  "beccs"="Bioenergy cropping", 
+  "solar"="Solar", 
+  "wind"="Wind"
+)
+
+
+col_to_plot <- c('#117733','#999333','#88CCEE','#44AA99','#DDCC77','#332288','#882255','#CC6677','#AA4499')
+k <- 1
+time_figs <- c()
+for(intervention in interventions){
+  
+
+  
+  file_path <- file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = ''))
+  time_path <- file.path(result_dir, intervention, 'time_posterior.csv')
+  if(file.exists(time_path)){
+    fullDF <- read.csv(file_path, row.names = 1)
+    
+    
+    
+    sub_df <- fullDF[!is.na(fullDF$lrr_richness),]
+    sub_df <- sub_df[sub_df$lrr_richness != Inf,]
+    sub_df <- sub_df[sub_df$lrr_richness != -Inf,]
+    
+    sub_df <- sub_df[sub_df$intervention_length < 100,]
+    
+    posterior_vals <- read.csv(time_path, row.names = 1)
+    
+    
+    
+    int_vals <- posterior_vals$b_Intercept
+    time_vals <- posterior_vals$b_intervention_length
+    
+    
+    max_time <- round(max(sub_df$intervention_length, na.rm = T) * 1.1)
+    x_vals <- seq(0, max_time,max_time/100)
+    
+    plot_posterior_est <- outer(x_vals, time_vals) + outer(rep(1, length(x_vals)), int_vals)
+    
+    mean_values <- exp(rowMeans(plot_posterior_est))
+    min_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.025))
+    max_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.975))
+    
+    low_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.1))
+    high_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.9))
+    
+    plotting_df <- as.data.frame(cbind(x_vals, mean_values, min_values, max_values, low_values, high_values))
+    colnames(plotting_df) <- c('x_vals', 'mean_values', 'min_values', 'max_values', 'low_values', 'high_values')
+    
+    
+    xlabel <- ''
+    ylabel <- ''
+    if(intervention == 'solar'){
+      xlabel <- 'Time since intervention (years)'
+    }
+    if(intervention == 'wetland_restoration-coastal'){
+      ylabel <- 'Change in species richness'
+    }
+    
+    
+    lty <- 'dashed'
+    lwd <- 1
+    if(intervention == 'grassland_restoration'){
+      lty <- 'solid'
+      lwd <- 2
+    }
+    
+    a <- ggplot(plotting_df, aes(x = x_vals, y = mean_values)) +
+      geom_line(color = col_to_plot[k], linetype = lty, linewidth  = lwd) +
+      theme_classic() + 
+      geom_ribbon(data = plotting_df, aes(x = x_vals, ymin = low_values, ymax = high_values), 
+                  fill = col_to_plot[k],
+                  alpha = 0.5) +
+      geom_ribbon(data = plotting_df, aes(x = x_vals, ymin = min_values, ymax = max_values), 
+                  fill = col_to_plot[k],
+                  alpha = 0.2) +
+      
+      coord_cartesian(ylim = c(0.25,4), xlim = c(0,max_time)) +
+      scale_y_continuous(trans='log2',
+                         breaks = c(0.25, 0.5, 1, 2, 4),
+                         labels = c('1/4', '1/2', '1', '2', '4')) +
+      theme_classic() +
+      geom_hline(yintercept = 1, lty = 3) +
+      theme(legend.position="none") +
+      xlab(xlabel) +
+      ylab(ylabel) + 
+      theme(text=element_text(size=8)) +
+      ggtitle(plot_labels[intervention]) +
+      geom_point(data = sub_df , aes(x = intervention_length, y = exp(lrr_richness)), 
+                 col = col_to_plot[k],
+                 alpha = 0.45,
+                 cex = 0.5)
+    
+    
+    fPath <- file.path(figure_dir, paste(intervention, '_time.png'))
+    png(fPath, width = 4, height = 3, units = 'in', res = 600)
+    print(a)
+    dev.off()
+  }
+  
+  time_figs[[k]] <- a
+  k <- k + 1
+}
+
+
+fPath <- file.path(figure_dir, paste('all_time.png'))
+png(fPath, width = 9, height = 6, units = 'in', res = 600)
+grid.arrange(time_figs[[1]],time_figs[[2]],time_figs[[3]],
+             time_figs[[4]],time_figs[[5]],time_figs[[6]],
+             time_figs[[7]],time_figs[[8]],time_figs[[9]],
+             nrow = 3)
+dev.off()
+
+
+k <- 1
+size_figs <- c()
+for(intervention in interventions){
+  
+  
+  file_path <- file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = ''))
+  size_path <- file.path(result_dir, intervention, 'size_posterior.csv')
+  if(file.exists(size_path)){
+    
+    fullDF <- read.csv(file.path(data_dir, 'augmented', paste(intervention, '.csv', sep = '')), row.names = 1)
+   
+    
+    sub_df <- fullDF[!is.na(fullDF$lrr_richness),]
+    sub_df <- sub_df[sub_df$lrr_richness != Inf,]
+    sub_df <- sub_df[sub_df$lrr_richness != -Inf,]
+    
+    
+    
+    posterior_vals <- read.csv(file.path(result_dir, intervention, 'size_posterior.csv'), row.names = 1)
+    
+    xlabel <- ''
+    ylabel <- ''
+    if(intervention == 'solar'){
+      xlabel <- 'Size of intervention (log(hectares))'
+    }
+    if(intervention == 'wetland_restoration-coastal'){
+      ylabel <- 'Change in species richness'
+    }
+    
+    int_vals <- posterior_vals$b_Intercept
+    size_vals <- posterior_vals$b_logmean_size_ha
+    
+    sub_df$mean_size_ha <- log(sub_df$mean_size_ha)
+    min_size <- round(min(sub_df$mean_size_ha, na.rm = T) * 1.1)
+    max_size <- round(max(sub_df$mean_size_ha, na.rm = T) * 1.1)
+    x_vals <- seq(min_size, max_size,max_size/100)
+    
+    plot_posterior_est <- outer(x_vals, size_vals) + outer(rep(1, length(x_vals)), int_vals)
+    
+    mean_values <- exp(rowMeans(plot_posterior_est))
+    min_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.025))
+    max_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.975))
+    
+    low_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.1))
+    high_values <- exp(rowQuantiles(plot_posterior_est, probs = 0.9))
+    
+    plotting_df <- as.data.frame(cbind(x_vals, mean_values, min_values, max_values, low_values, high_values))
+    
+    colnames(plotting_df) <- c('x_vals', 'mean_values', 'min_values', 'max_values', 'low_values', 'high_values')
+ 
+    
+    lty <- 'dashed'
+    lwd <- 1
+    if(intervention == 'grassland_restoration'){
+      lty <- 'solid'
+      lwd <- 2
+    }
+    if(intervention == 'reforestation'){
+      lty <- 'solid'
+      lwd <- 2
+    }
+    if(intervention == 'wetland_restoration-coastal'){
+      lty <- 'solid'
+      lwd <- 2
+    }
+    
+    a <- ggplot(plotting_df, aes(x = x_vals, y = mean_values)) +
+      geom_line(color = col_to_plot[k], linetype = lty, linewidth = lwd) +
+      theme_classic() + 
+      geom_ribbon(data = plotting_df, aes(x = x_vals, ymin = low_values, ymax = high_values), 
+                  fill = col_to_plot[k],
+                  alpha = 0.5) +
+      geom_ribbon(data = plotting_df, aes(x = x_vals, ymin = min_values, ymax = max_values), 
+                  fill = col_to_plot[k],
+                  alpha = 0.2) +
+      scale_y_continuous(trans='log2', 
+                         breaks = c(0.25, 0.5, 1, 2, 4),
+                         labels = c('1/4', '1/2', '1', '2', '4')) + 
+      
+      coord_cartesian(ylim = c(0.25,4), xlim = c(min_size,max_size)) +
+      theme_classic() +
+      geom_hline(yintercept = 1, lty = 3) +
+      theme(legend.position="none") +
+      xlab(xlabel) +
+      ylab(ylabel) + 
+      ggtitle(plot_labels[intervention]) +
+      theme(text=element_text(size=8)) +
+      geom_point(data = sub_df , aes(x = (mean_size_ha), y = exp(lrr_richness)), 
+                 col = col_to_plot[k],
+                 alpha = 0.45,
+                 cex = 0.5)
+    fPath <- file.path(figure_dir, paste(intervention, '_size.png'))
+    png(fPath, width = 4, height = 3, units = 'in', res = 600)
+    print(a)
+    dev.off()
+  }
+  size_figs[[k]] <- a
+  k <- k + 1
+  
+}
+
+fPath <- file.path(figure_dir, paste('all_size.png'))
+png(fPath, width = 9, height = 6, units = 'in', res = 600)
+grid.arrange(size_figs[[1]],size_figs[[2]],size_figs[[3]],
+             size_figs[[4]],size_figs[[5]],size_figs[[6]],
+             size_figs[[7]],size_figs[[8]],size_figs[[9]],
+             nrow = 3)
+dev.off()
+
+
+#Create main figure
+plotDF <- data.frame()
+interventions <- c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 'wetland_restoration-coastal',
+                   'agroforestry', 'aforestation', 'beccs', 'solar', 'wind')
+for(i in interventions){
+  fullDF <- read.csv(file.path(data_dir, 'augmented', paste(i, '.csv', sep = '')), row.names = 1)
+  print(c(i, length(unique(fullDF$study_id)), nrow(fullDF)))
+  fullDF$intervention <- i
+  fullDF <- fullDF[,c('site_longitude_dd' ,'site_latitude_dd', 'intervention',
+                      'mean_size_ha', 'intervention_length',
+                      'mean_temp', 'mean_precip', 'zone',
+                      'lrr_richness', 'N_int', 
+                      'S_intervention', 'S_reference', 'S_aggregation')]
+  
+  
+  plotDF <- rbind(plotDF,fullDF)
+}
+
+
+
+#Heat map of size vs. age
+
+
+plotDF$site_longitude_dd <- as.numeric(plotDF$site_longitude_dd)
+plotDF$site_latitude_dd <- as.numeric(plotDF$site_latitude_dd)
+
+plotDF <- plotDF[complete.cases(plotDF),]
+plotDF <- plotDF[plotDF$site_longitude_dd > -9999,]
+plotDF <- plotDF[plotDF$site_longitude_dd < 9999,]
+
+
+
+
+
+countries <- ne_countries(scale = "medium", returnclass = "sf")
+countries <- countries[countries$name_en != 'Antarctica',]
+
+plotCRS <- "+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs"
+countries <- spTransform(countries, plotCRS)
+
+ggplot(countries) +
+  geom_sf(col = 'darkgray') +
+  theme_void() +
+  geom_point(data = plotDF, aes(x = site_longitude_dd , y = site_latitude_dd, fill = intervention), 
+             size = 2, 
+             shape = 21) 
+write.csv(plotDF, file.path(result_dir, 'map_csv.csv'))
+write_sf(countries, file.path(result_dir, 'countries.shp'))
+        
+
+
+
+
+
+plotDF$color <- 'lightgray'
+
+k <- 1
+for(i in interventions){
+  plotDF[plotDF$intervention == i, 'color'] <- col_to_plot[k]
+  k <- k + 1
+}
+
+plotDF2 <- plotDF
+plotDF2[plotDF2 == 'wind'] <- 'Wind'
+plotDF2[plotDF2 == 'grassland_restoration'] <- 'Grassland restoration'
+plotDF2[plotDF2 == 'reforestation'] <- 'Reforestation'
+plotDF2[plotDF2 == 'aforestation'] <- 'Afforestation'
+plotDF2[plotDF2 == 'solar'] <- 'Solar'
+plotDF2[plotDF2 == 'beccs'] <- 'Bioenergy crops'
+plotDF2[plotDF2 == 'agroforestry'] <- 'Agroforestry'
+plotDF2[plotDF2 == 'wetland_restoration-coastal'] <- 'Coastal wetland restoration'
+plotDF2[plotDF2 == 'wetland_restoration-inland'] <- 'Inland wetland restoration'
+
+
+
+
+
+custom_colors <- c('Reforestation'= '#117733',
+                   "Grassland restoration"= '#999333',
+                   "Inland wetland restoration" = '#88CCEE',
+                   "Coastal wetland restoration"= '#44AA99',
+                   "Agroforestry"  ='#DDCC77',
+                   "Afforestation"   ='#332288',
+                   "Bioenergy crops"='#882255',
+                   'Solar'='#CC6677',
+                   'Wind'='#AA4499')
+
+#Density by absolute latitutde, color by color column, use  intervention for labels
+png(file.path(figure_dir, 'latitude_density.png'), width = 6, height = 4, units = 'in', res = 600)
+
+
+
+a <- ggplot(data = plotDF2, aes(x = abs(site_latitude_dd), fill = intervention)) +
+  geom_density(alpha = 0.5) + 
+  theme_classic() + 
+  xlab('Absolute latitude') + 
+  ylab('Density') +
+  scale_fill_manual(values = custom_colors) 
+
+
+
+print(a)
+dev.off()
+
+#By intervention
+png(file.path(figure_dir, 'latitude_density_by_intervention.png'), width = 9, height = 6, units = 'in', res = 600)
+a <- ggplot(data = plotDF2, aes(x = abs(site_latitude_dd), fill = intervention)) +
+  geom_density(alpha = 0.5) + 
+  theme_classic() + 
+  facet_wrap(~intervention) +
+  xlab('Absolute latitude') + 
+  ylab('Density') +
+  scale_fill_manual(values = custom_colors)
+print(a)
+dev.off()
+
+
+#Scatter plot of number of tropical vs temperate studies colored by each intervention
+plotDF2$zone <- 'Temperate'
+plotDF2[abs(plotDF2$site_latitude_dd) < 23.5, 'zone'] <- 'Tropical'
+plotDF2[abs(plotDF2$site_latitude_dd) > 66.5, 'zone'] <- 'Boreal'
+
+study_summary <- plotDF2 %>%
+  group_by(intervention, zone) %>%
+  summarise(num_studies = length(site_latitude_dd))
+study_summary <- as.data.frame(study_summary)
+temperate_summary <- study_summary[study_summary$zone == 'Temperate',]
+tropical_summary <- study_summary[study_summary$zone == 'Tropical',]
+merged_summary <- merge(temperate_summary, tropical_summary, by = 'intervention', suffixes = c('_temperate', '_tropical'))
+
+
+png(file.path(figure_dir, 'tropical_vs_temperate_studies.png'), width = 6, height = 6, units = 'in', res = 600)
+a <- ggplot(merged_summary, aes(x = num_studies_temperate, y = num_studies_tropical, 
+                                label = intervention, color = intervention)) +
+  geom_point(size = 3) +
+  theme_classic() +
+  xlab('Number of temperate observations') +
+  ylab('Number of tropical observations') +
+  geom_abline(slope = 1, intercept = 0, lty = 2) + 
+  scale_x_log10() +
+  scale_y_log10() + 
+  coord_fixed(ratio = 1) +
+  expand_limits(x = 1, y = 1) +
+  theme(
+    legend.position = c(0, 1),  # X and Y coordinates (0=left/bottom, 1=right/top)
+    legend.justification = c(0, 1), # Justification of the legend box (0=left/bottom, 1=right/top)
+    legend.background = element_rect(fill = "transparent", color = NA) 
+    ) +
+  scale_color_manual(values = custom_colors)
+
+print(a)
+dev.off()
+
+
+# Get all CSV files
+interventions <- c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 'wetland_restoration-coastal',
+                   'agroforestry', 'aforestation', 'beccs', 'solar', 'wind')
+
+taxa_groups <- c('invertebrates', 'vertebrates', 'plants', 'microbes')
+
+# Initialize summary data frame
+summary_data <- data.frame()
+
+# Loop through files and compute means
+for(i in interventions) {
+  df <- read.csv(file.path(result_dir, i, 'taxa_posterior.csv'))
+  
+  
+  sig_df <- matrix(NA, nrow = 4, ncol = 4)
+  rownames(sig_df) <- taxa_groups
+  colnames(sig_df) <- taxa_groups
+  sig_df <- as.data.frame(sig_df)
+  
+  for(j in taxa_groups){
+    toBind <- NULL
+    try(toBind <- c(i, j, as.numeric(quantile(df$b_Intercept + df[,paste('r_taxa_grouped', j, 'Intercept.', sep = '.')],
+                                                                  c(0.025,0.1,0.5,0.9,0.975)))))
+    if(!is.null(toBind)){
+      for(k in taxa_groups){
+        sig_difs <- NULL
+        try(sig_difs <- df[,paste('r_taxa_grouped', j, 'Intercept.', sep = '.')] - 
+                      df[,paste('r_taxa_grouped', k, 'Intercept.', sep = '.')])
+        try(sig_df[j,k] <- sign(quantile(sig_difs, 0.025)) == sign(quantile(sig_difs,0.975)))
+      }
+    }
+
+    
+    summary_data <- rbind(summary_data, toBind)
+  }
+  print(i)
+  print(sig_df)
+}
+summary_data <- as.data.frame(summary_data)
+names(summary_data) <- c('intervention_type', 'taxa_grouped',
+                         'lower_bound', 'lower', 'mean_value', 'upper', 'upper_bound')
+
+# Add size and color columns
+summary_data$size <- abs(as.numeric(summary_data$mean_value))
+summary_data$direction <- ifelse(summary_data$mean_value >= 0, "Positive", "Negative")
+
+
+summary_data$mean_value <- as.numeric(summary_data$mean_value)
+summary_data$lower_bound <- as.numeric(summary_data$lower_bound)
+summary_data$upper_bound <- as.numeric(summary_data$upper_bound)
+
+# Plot using ggplot2
+
+
+# Update intervention names
+summary_data$intervention_type <- factor(summary_data$intervention_type, 
+                                         levels = rev(c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 
+                                                    'wetland_restoration-coastal', 'agroforestry', 'aforestation', 
+                                                    'beccs', 'solar', 'wind')),
+                                         labels = rev(c('Reforestation', 'Grassland Restoration', 'Inland Wetland Restoration', 
+                                                    'Coastal Wetland Restoration', 'Agroforestry', 'Afforestation', 
+                                                    'Bioenergy Cropping', 'Solar', 'Wind')))
+
+
+summary_data$taxa_grouped <- factor(summary_data$taxa_grouped, 
+                                         levels = (c('plants', 'invertebrates', 'vertebrates', 
+                                                        'microbes')),
+                                         labels = (c('Plants', 'Invertebrates', 'Vertebrates', 
+                                                        'Microbes')))
+
+# Order the data by intervention type
+summary_data <- summary_data[order(summary_data$intervention_type), ]
+
+
+summary_data$mean_value <- 2**(as.numeric(summary_data$mean_value))
+summary_data$lower_bound <- 2**(as.numeric(summary_data$lower_bound))
+summary_data$upper_bound <- 2**(as.numeric(summary_data$upper_bound))
+summary_data$lower <- 2**(as.numeric(summary_data$lower))
+summary_data$upper <- 2**(as.numeric(summary_data$upper))
+
+# Plot using ggplot2
+taxa_graph <- ggplot(summary_data, aes(y = intervention_type, x = mean_value, color = taxa_grouped)) +
+  geom_point(size = 2, position = position_dodge(width = 0.5)) +
+  
+  # Thin line: min to max
+  geom_linerange(aes(xmin = lower_bound, xmax = upper_bound), size = 0.25, position = position_dodge(width = 0.5)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = lower, xmax = upper), size = 1, position = position_dodge(width = 0.5)) + 
+  
+  scale_color_manual(values = c('Vertebrates'="#1f77b4", 'Invertebrates'="#ff7f0e", 'Plants'="#2ca02c", 'Microbes'="#9467bd")) + 
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  theme_classic() +
+  labs(
+    y = "",
+    x = "Mean Posterior Effect",
+    color = "Taxa"
+  ) +
+  
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.25, 0.5, 1, 2, 4),
+                     labels = c('1/4', '1/2', '1', '2', '4')) +
+  coord_cartesian( xlim = c(0.25,4)) +
+
+  xlab('X-fold change in species richness') +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  
+  #Legend with black border
+  theme(axis.text.y = element_text(angle = 0, hjust = 1),
+        strip.text.y = element_text(angle = 0),
+        legend.position = c(0.15,0.88),
+        legend.background = element_rect(color = "black", size = 0.5))
+
+fPath <- file.path(figure_dir, paste('by_taxa.png'))
+png(fPath, width = 9, height = 6, units = 'in', res = 600)
+print(taxa_graph)
+dev.off()
+
+# Initialize summary data frame
+summary_data <- data.frame()
+
+            
+
+
+# Loop through files and compute means
+for(i in c(interventions, 'forestation')) {
+  df <- read.csv(file.path(result_dir, i, 'biome_posterior.csv'))
+  
+  
+  biomes <- grep('r_BIOME_NAME', colnames(df), value = T)
+  for(j in biomes){
+    toBind <- NULL
+    k <- str_replace(j, 'r_BIOME_NAME.', '')
+    k <- str_replace(k, 'Intercept', '')
+    try(toBind <- c(i, k, mean(df[,j], na.rm = T),
+                    quantile(df[,j], 0.025, na.rm = T),
+                    quantile(df[,j], 0.975, na.rm = T),
+                    quantile(df[,j], 0.1, na.rm = T),
+                    quantile(df[,j], 0.9, na.rm = T)))
+    summary_data <- rbind(summary_data, toBind)
+  }
+  
+  
+  
+}
+names(summary_data) <- c('intervention_type', 'biome', 'mean_value',
+                         'lower_bound', 'upper_bound', 'lower', 'upper')
+
+# Add size and color columns
+summary_data$size <- abs(as.numeric(summary_data$mean_value))
+summary_data$direction <- ifelse(summary_data$mean_value >= 0, "Positive", "Negative")
+
+
+
+
+summary_data <- data.frame()
+for(i in c(interventions, 'forestation')) {
+  df <- read.csv(file.path(result_dir, i, 'forested_posterior.csv'))
+  
+  sig_df <- df$b_forestedY
+  sig_dif <- quantile(sig_df, c(0.025, 0.975))
+  sig_dif <- sign(sig_dif[1]) == sign(sig_dif[2])
+  
+  toBind <- c(i, 'No', mean(df$b_Intercept), as.numeric(quantile(df$b_Intercept, c(0.025, 0.1, .9, 0.975))), sig_dif)
+  
+  
+  toBind2 <- c(i, 'Yes', mean(df[,'b_Intercept']+df[,'b_forestedY']), as.numeric(quantile(df[,'b_forestedY']+df[,'b_Intercept'], c(0.025, 0.1, .9, 0.975))), sig_dif)
+  
+  
+  
+  
+  summary_data <- rbind(summary_data, toBind)
+  summary_data <- rbind(summary_data, toBind2)
+  
+  
+  
+}
+names(summary_data) <- c('intervention_type', 'forest_biome', 'mean_value', 'lower_bound', 'lower', 'upper', 'upper_bound', 'sig_dif')
+summary_data$size <- abs(as.numeric(summary_data$mean_value))
+summary_data$direction <- ifelse(summary_data$mean_value >= 0, "Positive", "Negative")
+
+summary_data$mean_value <- 2**as.numeric(summary_data$mean_value)
+summary_data$lower_bound <- 2**as.numeric(summary_data$lower_bound)
+summary_data$upper_bound <- 2**as.numeric(summary_data$upper_bound)
+
+summary_data$lower <- 2**as.numeric(summary_data$lower)
+summary_data$upper <- 2**as.numeric(summary_data$upper)
+
+
+summary_data$intervention_type <- factor(summary_data$intervention_type, 
+                                         levels = rev(c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 
+                                                        'wetland_restoration-coastal', 'agroforestry', 'aforestation', 
+                                                        'beccs', 'solar', 'wind', 'forestation')),
+                                         labels = rev(c('Reforestation', 'Grassland Restoration', 'Inland Wetland Restoration', 
+                                                        'Coastal Wetland Restoration', 'Agroforestry', 'Afforestation', 
+                                                        'Bioenergy Cropping', 'Solar', 'Wind', 'Forestation')))
+
+
+
+
+
+
+biome_data <- summary_data[summary_data$intervention_type %in% c('Reforestation',
+                                                                 'Grassland Restoration',
+                                                                 'Inland Wetland Restoration',
+                                                                 'Coastal Wetland Restoration',
+                                                                 'Agroforestry',
+                                                                 'Afforestation'),]
+
+biome_data$forest_biome[biome_data$forest_biome == 'Yes'] <- 'Forested'
+biome_data$forest_biome[biome_data$forest_biome == 'No'] <- 'Open'
+
+biome_graph <- ggplot(biome_data, aes(y = intervention_type, x = mean_value, xmin = lower_bound, xmax = upper_bound, color = forest_biome)) +
+  geom_pointrange(position =  position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  theme_classic() +
+  # Thin line: min to max
+  geom_linerange(aes(xmin = lower_bound, xmax = upper_bound), size = 0.25, position = position_dodge(width = 0.4)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = lower, xmax = upper), size = 1, position = position_dodge(width = 0.4)) + 
+  
+  labs(
+    y = "",
+    x = "X-fold change in species richness",
+    color = "Biome\ntype",
+    title = ""
+  ) +
+  scale_color_manual(values = c("Forested" = "#3f5a36", "Open" = "#be864e")) +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1),
+        strip.text.y = element_text(angle = 0)) +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.67, 0.75, 1, 1.25, 1.5, 2),
+                     labels = c('2/3', '3/4', '1', '5/4', '3/2', '2')) +
+  coord_cartesian( xlim = c(0.75,2)) +
+  #Add a '*" to grassalnd restoration lines
+  annotate("text", x = 1.5, y = 1.1, label = ".", size = 8, fontface = "bold") +
+  annotate("text", x = 1.5, y = 1.9, label = "*", size = 8, fontface = "bold") +
+  annotate("text", x = 1.5, y = 4.9, label = "*", size = 8, fontface = "bold") +
+  
+  #Legend top left, and align the test to the right of the box
+  #Add box around legend
+  theme(legend.position = c(0.89,0.94) ,
+        legend.background = element_rect(color = "black", size = 0.5),
+        legend.text.align = 0)
+
+fPath <- file.path(figure_dir, paste('by_biome.png'))
+png(fPath, width = 6, height = 4, units = 'in', res = 600)
+print(biome_graph)
+dev.off()
+
+
+#Make combined biome_graph and method_graph
+#Forest specific
+#Read in augmented file
+fullDF <- read.csv(file.path(data_dir, 'augmented', paste('forestation', '.csv', sep = '')), row.names = 1)
+
+sub_df <- fullDF[!is.na(fullDF$lrr_richness),]
+sub_df <- sub_df[sub_df$lrr_richness != Inf,]
+sub_df <- sub_df[sub_df$lrr_richness != -Inf,]
+
+sub_df <- sub_df[sub_df$forest_type %in% c('timber plantation', 'natural forest restoration'),]
+
+toDrop <- sub_df[sub_df$S_aggregation == 'summed',]
+try(toDrop <- row.names(toDrop[toDrop$equal_N == F,]))
+
+sub_df <- sub_df[!(row.names(sub_df) %in% toDrop), ]
+
+sub_df$S_aggregation <- str_replace(sub_df$S_aggregation,
+                                    "mean ± uncert",
+                                    "mean")
+sub_df <- sub_df[sub_df$S_aggregation %in% c('mean', 'summed'),]
+
+ma_forset_type <- brm(ma_lrr_forest_type_inter_form, data = sub_df, prior = ma_priors, 
+                      cores = 4, sample_prior = "yes", warmup = wup,
+                      iter = niter, control = list(adapt_delta = adelta))
+
+
+post_a <- posterior_samples(ma_forset_type)
+
+
+toPlot <- data.frame(row.names = c(1:nrow(post_a)))
+toPlot$plantation_open <- post_a$b_Intercept + post_a$b_forest_typetimberplantation
+toPlot$plantation_forest <- post_a$b_Intercept + post_a$b_forest_typetimberplantation + post_a$`b_forest_typetimberplantation:forestedY` + post_a$b_forestedY
+
+toPlot$nfr_open <- post_a$b_Intercept 
+toPlot$nfr_forest <- post_a$b_Intercept + post_a$b_forestedY
+
+#Pairwise test between to Plot columns to see if 95% of draws are higher or lower
+pairwise_test <- function(col1, col2){
+  diff <- toPlot[,col1] - toPlot[,col2]
+  
+  
+  return(quantile(diff, c(0.025,0.975)))
+}
+print('Plantation open vs forested')
+print(pairwise_test('plantation_open', 'plantation_forest'))
+print('NFR open vs forested')
+print(pairwise_test('nfr_open', 'nfr_forest'))
+print('Plantation open vs NFR open')
+print(pairwise_test('plantation_open', 'nfr_open'))
+print('Plantation forested vs NFR forested')
+print(pairwise_test('plantation_forest', 'nfr_forest'))
+print('Plantation open vs NFR forested')
+print(pairwise_test('plantation_open', 'nfr_forest'))
+print('Plantation forested vs NFR open')
+print(pairwise_test('plantation_forest', 'nfr_open'))
+
+
+#Summarize toPlot with credible intervals and save to csv
+toBind1 <- c('Plantation', 'Open', round(exp(quantile(toPlot$plantation_open, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))),3))
+toBind2 <- c('Platnation', 'Forested', round(exp(quantile(toPlot$plantation_forest, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))),3))
+toBind3 <- c('Natural forest regrowth', 'Open', round(exp(quantile(toPlot$nfr_open, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))),3))
+toBind4 <- c('Natural forest regrowth', 'Forested', round(exp(quantile(toPlot$nfr_forest, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))),3))
+
+toSave <- rbind(toBind1,toBind2,toBind3,toBind4)
+toSave <- as.data.frame(toSave)
+colnames(toSave) <- c('Method', 'Biome', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+
+write.csv(toSave, file.path(result_dir, 'forest_type_summary.csv'), row.names = F)
+
+#Get quantile 0.025, 0.1, 0.5, 0.8, and 0.975 from toPlot for each column
+quantiles <- function(x){
+  return(2**quantile(x, c(0.025, 0.1, 0.5, 0.9, 0.975)))
+}
+quantile_df <- as.data.frame(t(apply(toPlot, 2, quantiles)))
+colnames(quantile_df) <- c('lower_bound', 'lower', 'mean_value', 'upper', 'upper_bound')
+
+quantile_df$biome <- c('Open' , 'Forested', 'Open', 'Forested')
+quantile_df$method <- c('Plantation', 'Plantation', 'Natural forest regrowth', 'Natural forest regrowth')
+
+
+
+#Save to fig dir
+fPath <- file.path(figure_dir, paste('by_method_biome.png'))
+png(fPath, width = 6, height = 4, units = 'in', res = 300)
+method_graph <- ggplot(quantile_df, aes(y = method, x = mean_value, xmin = lower_bound, xmax = upper_bound, color = biome)) +
+  geom_pointrange(position =  position_dodge(width = 0.3)) +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  theme_classic() +
+  # Thin line: min to max
+  geom_linerange(aes(xmin = lower_bound, xmax = upper_bound), size = 0.25, position = position_dodge(width = 0.3)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = lower, xmax = upper), size = 1, position = position_dodge(width = 0.3)) + 
+  
+  labs(
+    y = "",
+    x = "X-fold change in species richness",
+    color = "Historic\necosystem",
+    title = ""
+  ) +
+  scale_color_manual(values = c("Forested" = "#3f5a36", "Open" = "#be864e")) +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1),
+        strip.text.y = element_text(angle = 0)) +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.75, 1, 1.25, 1.5, 2),
+                     labels = c('3/4', '1','5/4', '3/2', '2')) +
+  coord_cartesian( xlim = c(0.75,2)) +
+  #legend top left add black border
+  theme(legend.position = 'none') +
+  
+  #Put an A to the right of plantation, open
+  annotate("text", x = 1.3, y = 2.075, label = "A", size = 4, fontface = 'bold') +
+  
+  #Put a B to the rightg of plantation forest
+  annotate("text", x = 1.3, y = 1.925, label = "B", size = 4, fontface = "bold") +
+  
+  #Put a BC to the right of nfr open
+  annotate("text", x = 1.7, y = 1.075, label = "B", size = 4, fontface = "bold") +
+  
+  #Put a C to the right of NRR forest
+  annotate("text", x = 1.7, y = 0.925, label = "B", size = 4, fontface = "bold")
+print(method_graph)
+dev.off()
+
+#Make combined graph
+combined_graph <- ggarrange(biome_graph, method_graph,
+                            labels = c("A.", "B."),
+                            ncol = 1, nrow = 2,
+                            common.legend = F)
+fPath <- file.path(figure_dir, paste('biome_and_method.png'))
+png(fPath, width = 6, height = 8, units = 'in', res = 600)
+print(combined_graph)
+dev.off()
+
+
+#Do the same but for zone
+summary_data <- data.frame()
+for(i in c(interventions, 'forestation')) {
+  df <- read.csv(file.path(result_dir, i, 'zone_posterior.csv'))
+  
+  #grep element with b_zone from colnames 
+  j <- grep('b_zone', colnames(df), value = T)
+  
+
+  toBind <- c(i, j, mean(df[,j] + df$b_Intercept, na.rm = T),
+                    quantile(df[,j]+ df$b_Intercept, 0.025, na.rm = T),
+                    quantile(df[,j]+ df$b_Intercept, 0.975, na.rm = T),
+                    quantile(df[,j]+ df$b_Intercept, 0.1, na.rm = T),
+                    quantile(df[,j]+ df$b_Intercept, 0.9, na.rm = T))
+  
+  summary_data <- rbind(summary_data, toBind)
+  
+  toBind <- c(i,'b_zonetemperate', mean(df$b_Intercept, na.rm = T),
+              quantile(df$b_Intercept, 0.025, na.rm = T),
+              quantile(df$b_Intercept, 0.975, na.rm = T),
+              quantile(df$b_Intercept, 0.1, na.rm = T),
+              quantile(df$b_Intercept, 0.9, na.rm = T))
+  
+  summary_data <- rbind(summary_data, toBind)
+  
+  
+  
+  
+}
+names(summary_data) <- c('intervention_type', 'zone', 'mean_value',
+                         'lower_bound', 'upper_bound', 'lower', 'upper')
+# Add size and color columns
+summary_data$size <- abs(as.numeric(summary_data$mean_value))
+summary_data$direction <- ifelse(summary_data$mean_value >= 0, "Positive", "Negative")
+summary_data$mean_value <- 2**as.numeric(summary_data$mean_value)
+summary_data$lower_bound <- 2**as.numeric(summary_data$lower_bound)
+summary_data$upper_bound <- 2**as.numeric(summary_data$upper_bound)
+summary_data$lower <- 2**as.numeric(summary_data$lower)
+summary_data$upper <- 2**as.numeric(summary_data$upper)
+summary_data$intervention_type <- factor(summary_data$intervention_type, 
+                                         levels = rev(c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 
+                                                        'wetland_restoration-coastal', 'agroforestry', 'aforestation', 
+                                                        'beccs', 'solar', 'wind', 'forestation')),
+                                         labels = rev(c('Reforestation', 'Grassland Restoration', 'Inland Wetland Restoration', 
+                                                        'Coastal Wetland Restoration', 'Agroforestry', 'Afforestation', 
+                                                        'Bioenergy Cropping', 'Solar', 'Wind', 'Forestation')))
+summary_data$zone[summary_data$zone == 'b_zonetropical'] <- 'Tropical'
+summary_data$zone[summary_data$zone == 'b_zonetemperate'] <- 'Temperate'
+#Save graph
+png(file.path(figure_dir, 'by_zone.png'), width = 6, height = 4, units = 'in', res = 600)
+# Make forest plot using ggplot
+
+summary_data <- summary_data[summary_data$intervention_type != 'Forestation',]
+zone_graph <- ggplot(summary_data, aes(y = intervention_type, x = mean_value, xmin = lower_bound, xmax = upper_bound, color = zone)) +
+  geom_pointrange(position =  position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  theme_classic() +
+  # Thin line: min to max
+  geom_linerange(aes(xmin = lower_bound, xmax = upper_bound), size = 0.25, position = position_dodge(width = 0.4)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = lower, xmax = upper), size = 1, position = position_dodge(width = 0.4)) +
+  labs(
+    y = "",
+    x = "X-fold change in species richness",
+    color = "Zone",
+    title = ""
+  ) +
+  scale_color_manual(values = c("Tropical" = "#bcbd22", "Temperate" = "#17becf")) +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1),
+        strip.text.y = element_text(angle = 0)) +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.25, 0.5, 1, 2, 4),
+                     labels = c('1/4', '1/2', '1', '2', '4')) +
+  coord_cartesian( xlim = c(0.25,4)) +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1),
+        strip.text.y = element_text(angle = 0),
+        legend.position = c(0.13,0.88),
+        legend.background = element_rect(color = "black", size = 0.5)) +
+  #Add an asterisk to the right of reforestation lines
+  annotate("text", x = 2.5, y = 8.9, label = "*", size = 8, fontface = "bold") 
+
+print(zone_graph)
+dev.off()
+
+
+
+#Make 2 panel figure with taxa_graph and zone_graph
+combined_graph <- ggarrange(taxa_graph, zone_graph,
+                                labels = c("A.", "B."),
+                                ncol = 1, nrow = 2,
+                                common.legend = F)
+                            
+print(combined_graph)
+
+fPath <- file.path(figure_dir, paste('combined_taxa_zone.png'))
+png(fPath, width = 8, height = 11, units = 'in', res = 600)
+print(combined_graph)
+dev.off()
+
+
+#Make funnel plot
+
+
+funnel_df <- plotDF2
+funnel_df <- funnel_df[funnel_df$lrr_richness > -5,]
+funnel_df <- funnel_df[funnel_df$lrr_richness < 5,]
+
+png(file.path(figure_dir, 'funnel_plot.png'), width = 6, height = 6, units = 'in', res = 600)
+a <- ggplot(data = funnel_df, aes(x = N_int, y = lrr_richness)) +
+  geom_point(alpha = 0.5, size = 1) +
+  theme_classic() +
+  xlab('Number of observations') +
+  ylab('Mean Effect Size (log2 species richness change)') +
+  geom_hline(yintercept = 0, linetype = 'dotted') +
+  xlim(c(0,100)) +
+  ylim(c(-5,5))
+print(a)
+dev.off()
+
+#Create figure to test meta-analysis with and without weighting
+plotDF <- data.frame()
+interventions <- c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 'wetland_restoration-coastal',
+                   'agroforestry', 'aforestation', 'beccs', 'solar', 'wind')
+for(i in interventions){
+  
+  subDF_mean <- read.csv(file.path(result_dir, i, 'mean_posterior_test.csv'))
+  subDF_mean_w <- read.csv(file.path(result_dir, i, 'mean_w_posterior_test.csv'))
+
+  toBind1 <- as.data.frame(cbind(subDF_mean$b_Intercept, i, 'mean'))
+  colnames(toBind1) <- c('Value', 'Intervention', 'Method')
+  toBind1$Value <- as.numeric(toBind1$Value)
+
+  toBind2 <- as.data.frame(cbind(subDF_mean_w$b_Intercept, i, 'mean_w'))
+  colnames(toBind2) <- c('Value', 'Intervention', 'Method')
+  toBind2$Value <- as.numeric(toBind2$Value)
+
+
+  plotDF <- rbind(plotDF, toBind1, toBind2)
+}
+
+
+colnames(plotDF) <- c('Value', 'Intervention', 'Method')
+plotDF$Value <- exp(as.numeric(plotDF$Value))
+
+plotDF2 <- plotDF
+plotDF2 <- plotDF2[plotDF2$Value < 4,]
+plotDF2 <- plotDF2[plotDF2$Value > 0.25,]
+
+
+
+plotDF2[plotDF2 == 'wind'] <- 'Wind'
+plotDF2[plotDF2 == 'grassland_restoration'] <- 'Grassland restoration'
+plotDF2[plotDF2 == 'reforestation'] <- 'Reforestation'
+plotDF2[plotDF2 == 'aforestation'] <- 'Afforestation'
+plotDF2[plotDF2 == 'solar'] <- 'Solar'
+plotDF2[plotDF2 == 'beccs'] <- 'Bioenergy crops'
+plotDF2[plotDF2 == 'agroforestry'] <- 'Agroforestry'
+plotDF2[plotDF2 == 'wetland_restoration-coastal'] <- 'Coastal wetland restoration'
+plotDF2[plotDF2 == 'wetland_restoration-inland'] <- 'Inland wetland restoration'
+
+
+plotDF2[plotDF2 == 'mean_w'] <- 'Weighted'
+plotDF2[plotDF2 == 'mean'] <- 'Unweighted'
+
+
+# Summarize for plotting
+summaryDF <- plotDF2 %>%
+  group_by(Intervention, Method) %>%
+  summarise(
+    Median = median(Value, na.rm = TRUE),
+    Min = quantile(Value, 0.025, na.rm = TRUE),
+    Max = quantile(Value, 0.975, na.rm = TRUE),
+    Q1 = quantile(Value, 0.1, na.rm = TRUE),
+    Q3 = quantile(Value, 0.9, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+
+
+
+a <- ggplot(summaryDF, aes(y = Intervention, x = Median, color = Method)) +
+  geom_point(size = 5, position = position_dodge(width = 0.5)) +
+  
+  # Thin line: min to max
+  geom_linerange(aes(xmin = Min, xmax = Max), size = 0.5, position = position_dodge(width = 0.5)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = Q1, xmax = Q3), size = 2, position = position_dodge(width = 0.5)) + 
+  # Median point
+  scale_color_manual(values = c("Weighted" = "red4", "Unweighted" = "dodgerblue4")) +
+  theme_classic() +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.25, 0.5, 1, 2, 4),
+                     labels = c('1/4', '1/2', '1', '2', '4')) +
+  scale_y_discrete(limits = c('Solar', 'Wind', 'Bioenergy crops', 'Afforestation', 'Agroforestry',
+                              'Coastal wetland restoration', 'Inland wetland restoration', 'Grassland restoration', 'Reforestation')) + 
+  geom_vline(xintercept = 1, lty = 3) +
+  
+  xlab('X-fold change in species richness') +
+  ylab('') +
+  theme(text = element_text(size=20),
+        legend.position = c(0.89,0.92),
+        legend.background = element_rect(color = "black", size = 0.5),
+        legend.text.align = 0)  +
+  coord_cartesian( xlim = c(0.25,4)) 
+
+
+#Save figure
+fPath <- file.path(figure_dir, paste('test_figure.png'))
+png(fPath, width = 12, height = 8, units = 'in', res = 600)
+print(a)
+dev.off()
+
+
+
+
+
+
+
+
+
+
+#Loop through pooled posterior csvs, extract credible intervals (0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)
+#Make a big DF and save to a csv
+
+plot_labels <- c(
+  "reforestation"="Reforestation", 
+  "grassland_restoration"="Grassland restoration", 
+  "wetland_restoration-inland"="Inland wetland restoration",
+  "wetland_restoration-coastal"="Coastal wetland restoration", 
+  "agroforestry"="Agroforestry", 
+  "aforestation"="Afforestation",
+  "beccs"="Bioenergy cropping", 
+  "solar"="Solar", 
+  "wind"="Wind"
+)
+
+
+summary_data <- data.frame()
+for(i in c(interventions)) {
+  df <- read.csv(file.path(result_dir, i, 'pooled_posterior.csv'))
+  
+
+  toBind <- NULL
+  k <- j
+  try(toBind <- c(i, round(exp(quantile(df$b_Intercept, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4)))
+  summary_data <- rbind(summary_data, toBind)
+
+}
+
+summary_data <- as.data.frame(summary_data)
+names(summary_data) <- c('Intervetion', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+
+
+#Use plot_labels to update names 
+summary_data$Intervetion <- plot_labels[summary_data$Intervetion]
+write.csv(summary_data, file.path(result_dir, 'pooled_credible_intervals.csv'), row.names = F)
+
+
+#Do the same for taxa
+summary_data <- data.frame()
+for(i in c(interventions)) {
+  df <- read.csv(file.path(result_dir, i, 'taxa_posterior.csv'))
+  
+  taxa_vars <- c("r_taxa_grouped.microbes.Intercept.", 
+                 "r_taxa_grouped.plants.Intercept." ,
+                 "r_taxa_grouped.invertebrates.Intercept.", 
+                 "r_taxa_grouped.vertebrates.Intercept." )
+  for(j in taxa_vars){
+    toBind <- NULL
+    k <- str_replace(j, 'r_taxa_grouped.', '')
+    k <- str_replace(k, '.Intercept.', '')
+    try(toBind <- c(i, k, round(exp(quantile(df[,j], c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4)))
+    summary_data <- rbind(summary_data, toBind)
+  }
+  
+  
+  
+}
+names(summary_data) <- c('Intervetion', 'taxa', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+#Use plot_labels to update names
+summary_data$Intervetion <- plot_labels[summary_data$Intervetion]
+write.csv(summary_data, file.path(result_dir, 'taxa_credible_intervals.csv'), row.names = F)
+
+
+#Make csv file of posteriors for zones draws
+summary_data <- data.frame()
+for(i in c(interventions)) {
+  df <- read.csv(file.path(result_dir, i, 'zone_posterior.csv'))
+  
+
+
+
+  toBind <- c(i, 'Temperate', round(exp(quantile(df$b_Intercept, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+  toBind <- c(i, 'Tropical', round(exp(quantile(df$b_Intercept + df$b_zonetropical, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+  toBind <- c(i, 'Difference', round(exp(quantile(df$b_zonetropical, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+  
+  
+  
+}
+names(summary_data) <- c('Intervetion', 'Zone', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+#Use plot_labels to update names
+summary_data$Intervetion <- plot_labels[summary_data$Intervetion]
+write.csv(summary_data, file.path(result_dir, 'zone_credible_intervals.csv'), row.names = F)
+
+
+
+#Do the same as zones but for forested (Forest vs. open)
+summary_data <- data.frame()
+for(i in c(interventions)) {
+  df <- read.csv(file.path(result_dir, i, 'forested_posterior.csv'))
+
+  
+  toBind <- c(i, 'Open', round(exp(quantile(df$b_Intercept, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+  toBind <- c(i, 'Forested', round(exp(quantile(df$b_Intercept + df$b_forestedY, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+  toBind <- c(i, 'Difference', round(exp(quantile(df$b_forestedY, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+}
+
+names(summary_data) <- c('Intervetion', 'Biome', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+#Use plot_labels to update names
+summary_data$Intervetion <- plot_labels[summary_data$Intervetion]
+write.csv(summary_data, file.path(result_dir, 'biome_credible_intervals.csv'), row.names = F)
+
+
+
+#Compile posteriors for time and save
+summary_data <- data.frame()
+for(i in c(interventions)) {
+  df <- read.csv(file.path(result_dir, i, 'time_posterior.csv'))
+  
+  
+  toBind <- c(i, round(exp(quantile(df$b_intervention_length, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+  
+  
+  
+}
+
+names(summary_data) <- c('Intervetion', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+#Use plot_labels to update names
+summary_data$Intervetion <- plot_labels[summary_data$Intervetion]
+write.csv(summary_data, file.path(result_dir, 'time_credible_intervals.csv'), row.names = F)
+
+
+
+
+#Do same for size
+summary_data <- data.frame()
+for(i in c(interventions)) {
+  df <- read.csv(file.path(result_dir, i, 'size_posterior.csv'))
+  
+  
+  toBind <- c(i, round(exp(quantile(df$b_logmean_size_ha, c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))), 4))
+  summary_data <- rbind(summary_data, toBind)
+  
+}
+
+names(summary_data) <- c('Intervetion', as.character(c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975)))
+#Use plot_labels to update names
+summary_data$Intervetion <- plot_labels[summary_data$Intervetion]
+write.csv(summary_data, file.path(result_dir, 'size_credible_intervals.csv'), row.names = F)
+
+  
+
