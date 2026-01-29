@@ -15,7 +15,7 @@ library(posterior)
 library(sf)
 library(raster)
 library(terra)
-library(stringr)
+library(stringr) 
 
 #Set directories 
 base_dir <- '/Users/jeffreysmith/Documents/lbmsMeta/'
