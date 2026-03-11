@@ -2,7 +2,7 @@
 ## Initial set-up
 #################################################-
 
-#Load in libraries 
+#Load in libraries
 library(readxl)
 library(dplyr)
 library(ggplot2)
@@ -15,7 +15,7 @@ library(posterior)
 library(sf)
 library(raster)
 library(terra)
-library(stringr) 
+library(stringr)
 
 #Set directories 
 base_dir <- '/Users/jeffreysmith/Documents/lbmsMeta/'
@@ -213,6 +213,11 @@ ma_lrr_forest_type_form <- as.formula(paste('lrr_richness',
 ma_lrr_forest_type_inter_form <- as.formula(paste('lrr_richness', 
                                             rhs, 
                                             ' + forest_type * forested + S_aggregation'))
+
+#Fromula for roestation type and zone
+ma_lrr_forest_zone_inter_form <- as.formula(paste('lrr_richness', 
+                                            rhs, 
+                                            ' + forested * zone + S_aggregation'))
 
 # Formula for time and size together 
 ma_lrr_time_size_form <- as.formula(paste('lrr_richness', 
@@ -1185,7 +1190,9 @@ plot_labels <- c(
 )
 
 
-col_to_plot <- c('#117733','#999333','#88CCEE','#44AA99','#DDCC77','#332288','#882255','#CC6677','#AA4499')
+#col_to_plot <- c('#117733','#999333','#88CCEE','#44AA99','#DDCC77','#332288','#882255','#CC6677','#AA4499')
+col_to_plot <- rep('lightgray', 9)
+col_to_plot[2] <- 'dodgerblue4'
 k <- 1
 time_figs <- c()
 for(intervention in interventions){
@@ -1295,6 +1302,12 @@ dev.off()
 
 k <- 1
 size_figs <- c()
+
+col_to_plot <- rep('lightgray', 9)
+col_to_plot[1] <- 'dodgerblue4'
+col_to_plot[2] <- 'dodgerblue4'
+col_to_plot[4] <- 'dodgerblue4'
+
 for(intervention in interventions){
   
   
@@ -1737,12 +1750,12 @@ names(summary_data) <- c('intervention_type', 'forest_biome', 'mean_value', 'low
 summary_data$size <- abs(as.numeric(summary_data$mean_value))
 summary_data$direction <- ifelse(summary_data$mean_value >= 0, "Positive", "Negative")
 
-summary_data$mean_value <- 2**as.numeric(summary_data$mean_value)
-summary_data$lower_bound <- 2**as.numeric(summary_data$lower_bound)
-summary_data$upper_bound <- 2**as.numeric(summary_data$upper_bound)
+summary_data$mean_value <- exp(as.numeric(summary_data$mean_value))
+summary_data$lower_bound <- exp(as.numeric(summary_data$lower_bound))
+summary_data$upper_bound <- exp(as.numeric(summary_data$upper_bound))
 
-summary_data$lower <- 2**as.numeric(summary_data$lower)
-summary_data$upper <- 2**as.numeric(summary_data$upper)
+summary_data$lower <- exp(as.numeric(summary_data$lower))
+summary_data$upper <- exp(as.numeric(summary_data$upper))
 
 
 summary_data$intervention_type <- factor(summary_data$intervention_type, 
@@ -1763,10 +1776,14 @@ biome_data <- summary_data[summary_data$intervention_type %in% c('Reforestation'
                                                                  'Inland Wetland Restoration',
                                                                  'Coastal Wetland Restoration',
                                                                  'Agroforestry',
-                                                                 'Afforestation'),]
+                                                                 'Afforestation',
+                                                                 'Forestation'),]
 
 biome_data$forest_biome[biome_data$forest_biome == 'Yes'] <- 'Forested'
 biome_data$forest_biome[biome_data$forest_biome == 'No'] <- 'Open'
+
+#Drop reforestation and afforestation
+biome_data <- biome_data[!biome_data$intervention_type %in% c('Reforestation', 'Afforestation'),]
 
 biome_graph <- ggplot(biome_data, aes(y = intervention_type, x = mean_value, xmin = lower_bound, xmax = upper_bound, color = forest_biome)) +
   geom_pointrange(position =  position_dodge(width = 0.4)) +
@@ -1787,19 +1804,21 @@ biome_graph <- ggplot(biome_data, aes(y = intervention_type, x = mean_value, xmi
   theme(axis.text.y = element_text(angle = 0, hjust = 1),
         strip.text.y = element_text(angle = 0)) +
   scale_x_continuous(trans = 'log2',
-                     breaks = c(0.67, 0.75, 1, 1.25, 1.5, 2),
-                     labels = c('2/3', '3/4', '1', '5/4', '3/2', '2')) +
-  coord_cartesian( xlim = c(0.75,2)) +
+                     breaks = c(0.67, 0.75, 1, 1.25, 1.5, 2, 3),
+                     labels = c('2/3', '3/4', '1', '5/4', '3/2', '2', '3')) +
+  coord_cartesian( xlim = c(0.75,3)) +
   #Add a '*" to grassalnd restoration lines
-  annotate("text", x = 1.5, y = 1.1, label = ".", size = 8, fontface = "bold") +
-  annotate("text", x = 1.5, y = 1.9, label = "*", size = 8, fontface = "bold") +
-  annotate("text", x = 1.5, y = 4.9, label = "*", size = 8, fontface = "bold") +
+  annotate("text", x = 1.75, y = 1.1, label = ".", size = 8, fontface = "bold") +
+  annotate("text", x = 1.75, y = 1.9, label = "*", size = 8, fontface = "bold") +
+  annotate("text", x = 1.75, y = 4.9, label = "*", size = 8, fontface = "bold") +
   
   #Legend top left, and align the test to the right of the box
   #Add box around legend
   theme(legend.position = c(0.89,0.94) ,
         legend.background = element_rect(color = "black", size = 0.5),
-        legend.text.align = 0)
+        legend.text.align = 0) +
+  #Add A. to top left of graph 
+  annotate("text", x = 0.75, y = 5.5, label = "A.", size = 5, fontface = "bold")
 
 fPath <- file.path(figure_dir, paste('by_biome.png'))
 png(fPath, width = 6, height = 4, units = 'in', res = 600)
@@ -1832,9 +1851,7 @@ ma_forset_type <- brm(ma_lrr_forest_type_inter_form, data = sub_df, prior = ma_p
                       cores = 4, sample_prior = "yes", warmup = wup,
                       iter = niter, control = list(adapt_delta = adelta))
 
-
 post_a <- posterior_samples(ma_forset_type)
-
 
 toPlot <- data.frame(row.names = c(1:nrow(post_a)))
 toPlot$plantation_open <- post_a$b_Intercept + post_a$b_forest_typetimberplantation
@@ -1878,13 +1895,13 @@ write.csv(toSave, file.path(result_dir, 'forest_type_summary.csv'), row.names = 
 
 #Get quantile 0.025, 0.1, 0.5, 0.8, and 0.975 from toPlot for each column
 quantiles <- function(x){
-  return(2**quantile(x, c(0.025, 0.1, 0.5, 0.9, 0.975)))
+  return(exp(quantile(x, c(0.025, 0.1, 0.5, 0.9, 0.975))))
 }
 quantile_df <- as.data.frame(t(apply(toPlot, 2, quantiles)))
 colnames(quantile_df) <- c('lower_bound', 'lower', 'mean_value', 'upper', 'upper_bound')
 
 quantile_df$biome <- c('Open' , 'Forested', 'Open', 'Forested')
-quantile_df$method <- c('Plantation', 'Plantation', 'Natural forest regrowth', 'Natural forest regrowth')
+quantile_df$method <- c(' Plantation', ' Plantation', ' Natural\nforest\nregrowth', ' Natural\nforest\nregrowth')
 
 
 
@@ -1917,27 +1934,79 @@ method_graph <- ggplot(quantile_df, aes(y = method, x = mean_value, xmin = lower
   theme(legend.position = 'none') +
   
   #Put an A to the right of plantation, open
-  annotate("text", x = 1.3, y = 2.075, label = "A", size = 4, fontface = 'bold') +
+  annotate("text", x = 1.35, y = 2.1, label = "A", size = 4, fontface = 'bold') +
   
   #Put a B to the rightg of plantation forest
-  annotate("text", x = 1.3, y = 1.925, label = "B", size = 4, fontface = "bold") +
+  annotate("text", x = 1.35, y = 1.9, label = "B", size = 4, fontface = "bold") +
   
   #Put a BC to the right of nfr open
-  annotate("text", x = 1.7, y = 1.075, label = "B", size = 4, fontface = "bold") +
+  annotate("text", x = 1.75, y = 1.1, label = "B", size = 4, fontface = "bold") +
   
   #Put a C to the right of NRR forest
-  annotate("text", x = 1.7, y = 0.925, label = "B", size = 4, fontface = "bold")
+  annotate("text", x = 1.75, y = 0.9, label = "B", size = 4, fontface = "bold") +
+  
+  #Add B. to top left corner
+  annotate("text", x = 0.75, y = 2.5, label = "B.", size = 5, fontface = "bold")
 print(method_graph)
 dev.off()
 
-#Make combined graph
-combined_graph <- ggarrange(biome_graph, method_graph,
-                            labels = c("A.", "B."),
-                            ncol = 1, nrow = 2,
-                            common.legend = F)
+
+#Read in forestation zone posterior
+zone_post <- read.csv(file.path(result_dir, 'forestation', 'zone_posterior.csv'))
+
+#Get out the points to plot for tropical and temperate
+tropical_plot <- quantiles(zone_post$b_zonetropical + zone_post$b_Intercept)
+temperate_plot <- quantiles(zone_post$b_Intercept)
+
+#Make into df to plot
+zone_df <- data.frame(mean_value = c(tropical_plot[3], temperate_plot[3]),
+                      lower_bound = c(tropical_plot[1], temperate_plot[1]),
+                      upper_bound = c(tropical_plot[5], temperate_plot[5]),
+                      lower = c(tropical_plot[2], temperate_plot[2]),
+                      upper = c(tropical_plot[4], temperate_plot[4]),
+                      zone = c('Tropical', 'Temperate'))
+
+#Make forest plot
+forest_zone_g <- ggplot(zone_df, aes(y = zone, x = mean_value, xmin = lower_bound, xmax = upper_bound, color = zone)) +
+  geom_pointrange(position =  position_dodge(width = 0.3)) +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  theme_classic() +
+  # Thin line: min to max
+  geom_linerange(aes(xmin = lower_bound, xmax = upper_bound), size = 0.25, position = position_dodge(width = 0.3)) +
+  # Thick line: 25th to 75th percentile
+  geom_linerange(aes(xmin = lower, xmax = upper), size = 1, position = position_dodge(width = 0.3)) + 
+  
+  labs(
+    y = "",
+    x = "X-fold change in species richness",
+    color = "Historic\necosystem",
+    title = ""
+  ) +
+  scale_color_manual(values = c("Tropical" = "#695ba9", "Temperate" = "#ff9922")) +
+  theme(axis.text.y = element_text(angle = 0, hjust = 1),
+        strip.text.y = element_text(angle = 0)) +
+  scale_x_continuous(trans = 'log2',
+                     breaks = c(0.75, 1, 1.25, 1.5, 2),
+                     labels = c('3/4', '1','5/4', '3/2', '2')) +
+  coord_cartesian( xlim = c(0.75,2)) +
+  
+  #Add star for significane
+  annotate("text", x = 1.5, y = 1.5, label = ".", size = 8, fontface = "bold") +
+  #legend top left add black border
+  theme(legend.position = 'none') +
+  #Add C. to top left corner
+  annotate("text", x = 0.75, y = 2.5, label = "C.", size = 5, fontface = "bold")
+
+#Make combined graph with 
+
+my_layout <- rbind(c(1,1,1,2,2),
+                   c(1,1,1,3,3))
+
+
 fPath <- file.path(figure_dir, paste('biome_and_method.png'))
-png(fPath, width = 6, height = 8, units = 'in', res = 600)
-print(combined_graph)
+png(fPath, width = 10, height = 5, units = 'in', res = 600)
+par(mar = c(1,1,1,1))
+grid.arrange(grobs = c(biome_graph,method_graph, forest_zone_g), layout_matrix = my_layout)
 dev.off()
 
 
@@ -1975,11 +2044,11 @@ names(summary_data) <- c('intervention_type', 'zone', 'mean_value',
 # Add size and color columns
 summary_data$size <- abs(as.numeric(summary_data$mean_value))
 summary_data$direction <- ifelse(summary_data$mean_value >= 0, "Positive", "Negative")
-summary_data$mean_value <- 2**as.numeric(summary_data$mean_value)
-summary_data$lower_bound <- 2**as.numeric(summary_data$lower_bound)
-summary_data$upper_bound <- 2**as.numeric(summary_data$upper_bound)
-summary_data$lower <- 2**as.numeric(summary_data$lower)
-summary_data$upper <- 2**as.numeric(summary_data$upper)
+summary_data$mean_value <- exp(as.numeric(summary_data$mean_value))
+summary_data$lower_bound <- exp(as.numeric(summary_data$lower_bound))
+summary_data$upper_bound <- exp(as.numeric(summary_data$upper_bound))
+summary_data$lower <- exp(as.numeric(summary_data$lower))
+summary_data$upper <- exp(as.numeric(summary_data$upper))
 summary_data$intervention_type <- factor(summary_data$intervention_type, 
                                          levels = rev(c('reforestation', 'grassland_restoration', 'wetland_restoration-inland', 
                                                         'wetland_restoration-coastal', 'agroforestry', 'aforestation', 
@@ -1990,10 +2059,10 @@ summary_data$intervention_type <- factor(summary_data$intervention_type,
 summary_data$zone[summary_data$zone == 'b_zonetropical'] <- 'Tropical'
 summary_data$zone[summary_data$zone == 'b_zonetemperate'] <- 'Temperate'
 #Save graph
-png(file.path(figure_dir, 'by_zone.png'), width = 6, height = 4, units = 'in', res = 600)
+png(file.path(figure_dir, 'by_zone.png'), width = 8, height = 5, units = 'in', res = 600)
 # Make forest plot using ggplot
 
-summary_data <- summary_data[summary_data$intervention_type != 'Forestation',]
+#summary_data <- summary_data[summary_data$intervention_type != 'Forestation',]
 zone_graph <- ggplot(summary_data, aes(y = intervention_type, x = mean_value, xmin = lower_bound, xmax = upper_bound, color = zone)) +
   geom_pointrange(position =  position_dodge(width = 0.4)) +
   geom_vline(xintercept = 1, linetype = "dotted") +
@@ -2008,7 +2077,7 @@ zone_graph <- ggplot(summary_data, aes(y = intervention_type, x = mean_value, xm
     color = "Zone",
     title = ""
   ) +
-  scale_color_manual(values = c("Tropical" = "#bcbd22", "Temperate" = "#17becf")) +
+  scale_color_manual(values = c("Tropical" = "#695ba9", "Temperate" = "#ff9922")) +
   theme(axis.text.y = element_text(angle = 0, hjust = 1),
         strip.text.y = element_text(angle = 0)) +
   scale_x_continuous(trans = 'log2',
@@ -2020,7 +2089,8 @@ zone_graph <- ggplot(summary_data, aes(y = intervention_type, x = mean_value, xm
         legend.position = c(0.13,0.88),
         legend.background = element_rect(color = "black", size = 0.5)) +
   #Add an asterisk to the right of reforestation lines
-  annotate("text", x = 2.5, y = 8.9, label = "*", size = 8, fontface = "bold") 
+  annotate("text", x = 2.5, y = 9.9, label = "*", size = 8, fontface = "bold") +
+  annotate("text", x = 2.5, y = 1.2, label = ".", size = 8, fontface = "bold") 
 
 print(zone_graph)
 dev.off()
