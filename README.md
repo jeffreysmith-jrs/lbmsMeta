@@ -1,2 +1,147 @@
-# lbmsMeta
-Code for meta-analysis of the local biodiversity impacts of land-based climate change mitigation  
+# Local biodiversity impacts of land-based climate mitigation: analysis code
+
+Analysis code for Smith, J. R., Petry, W. K., Beaury, E. M., Richardson, P. R., Stouter, H., Michaels, R. L.,
+MacArthur-Waltz, D. J., Mi, C. & Levine, J. M. *The impact of land-based climate change mitigation on
+local biodiversity: A meta-analysis.*
+
+The code is a Bayesian meta-analysis (brms + cmdstanr) of the log response ratio of species richness
+between nine land-based mitigation strategies and their reference habitats: reforestation, afforestation,
+agroforestry, grassland restoration, inland and coastal wetland restoration, bioenergy cropping, solar and
+wind. Starting from the published database, it produces every figure and table in the main text and
+supplement.
+
+## Requirements
+
+- R (tested with 4.5.1) and these packages (tested versions in brackets): brms (2.23.0), cmdstanr (0.9.0)
+  with CmdStan installed (`cmdstanr::install_cmdstan()`; tested with CmdStan 2.40.0), posterior (1.7.0),
+  dplyr (1.2.1), tidyr (1.3.2), ggplot2 (4.0.3), cowplot (1.2.0), scales (1.4.0), sf (1.1.0),
+  terra (1.9.11), rnaturalearth (1.2.0) and rnaturalearthdata (1.0.0).
+- The database from Zenodo and the RESOLVE Ecoregions 2017 shapefile, placed in `data/` as described in
+  [`data/README.md`](data/README.md).
+
+## Running
+
+From the repository root:
+
+```
+Rscript run_analysis.R                  # every step
+Rscript run_analysis.R --from 05        # steps 05 and 06 only
+Rscript run_analysis.R --only 01,02     # selected steps
+Rscript run_analysis.R --dry-run        # list the steps that would run
+```
+
+Each step runs in its own R process and writes a log to `output/logs/`. The scripts can also be run one
+at a time (`Rscript 03_fit_main_models.R`, or `source()` from R with the repository root as the working
+directory). Every generated file goes to `output/`; set the environment variable `LBMS_OUTPUT_DIR` to use
+another folder. To refit some interventions only, set `LBMS_INTERVENTIONS` (e.g.
+`LBMS_INTERVENTIONS=beccs,solar`) for steps 03 and 04.
+
+| Step | Script | Output | Approx. time |
+|---|---|---|---|
+| 01 | `01_prepare_data.R`: adds intervention age and area, taxonomic group, biome, climate zone, sample sizes and sampling effort; splits forestation into reforestation and afforestation | `output/analysis_data/` | 30 s |
+| 02 | `02_effect_sizes.R`: log response ratio of species richness and its standard error | `output/effects/` | 5 s |
+| 03 | `03_fit_main_models.R`: main and moderator models | `output/models/<intervention>/*.rds` | hours |
+| 04 | `04_fit_sensitivity_models.R`: sensitivity analyses, publication bias, leave-one-study-out | `output/models/<intervention>/sensitivity/` | hours |
+| 05 | `05_summarise_models.R`: posterior summaries | `output/summaries/` | ~5 min |
+| 06 | `06_figures_and_tables.R`: figures and tables | `output/figures/`, `output/tables/` | ~1 min |
+
+`R/` holds the functions and settings shared by the steps: `paths.R` (file locations), `helpers.R`
+(intervention list and constants), `models.R` (sampler settings, priors, model formulas, convergence
+checks) and `plotting.R` (theme, colours, axes).
+
+All models use 4 chains of 5,000 iterations (2,000 warm-up) and seed 34953. A model that does not converge
+(R-hat > 1.01, bulk or tail ESS < 400, or any divergent transition) is refitted as described in the
+Methods; every attempt is logged in `output/models/model_convergence_log.csv`, and the rows each model
+uses in `output/models/model_na_drops.csv`.
+
+### Figures and tables without refitting the models
+
+Fitting every model takes several hours. The posterior summaries of the published fits are included in the
+Zenodo deposit (`model_summaries/`). To draw the figures and tables from them:
+
+```
+mkdir -p output/summaries
+cp <zenodo download>/model_summaries/* output/summaries/
+Rscript run_analysis.R --only 01,02,06
+```
+
+## Which rows enter the models
+
+`data/observations.csv` holds every comparison extracted from the included studies. The models use the
+comparisons with an effect size whose richness is a mean, median or sum per sampling unit. Values given as
+Chao estimates, rarefied richness or Margalef's index, and richness summed over unequal (or unreported)
+sampling effort in the two habitats, are kept in the database but left out of the models
+(`modelled_rows()` in `R/models.R`).
+
+## Outputs and the manuscript
+
+Files are named by their place in the paper.
+
+Main text:
+
+| Manuscript | File |
+|---|---|
+| Figure 1 | `output/figures/Figure_1_study_locations.png` |
+| Figure 2 | `output/figures/Figure_2_main_effects.png` |
+| Figure 3 | `output/figures/Figure_3_biome_and_zone.png` |
+| Figure 4 | `output/figures/Figure_4_intervention_area.png` |
+| Figure 5 | `output/figures/Figure_5_intervention_age.png` |
+| Table 1 | `output/tables/Table_1_interventions.csv` |
+
+Supplementary figures (`output/figures/`):
+
+| Supp. Fig. | File |
+|---|---|
+| 1 | PRISMA diagram (not generated by this code) |
+| 2 | `Figure_S2_zone_counts.png` |
+| 3 | `Figure_S3_latitude.png` |
+| 4-12 | `Figure_S4_locations_afforestation.png` ... `Figure_S12_locations_wind.png` |
+| 13 | `Figure_S13_study_heterogeneity.png` |
+| 14 | `Figure_S14_reference_structure.png` |
+| 15 | `Figure_S15_reference_human_use.png` |
+| 16 | `Figure_S16_taxonomic_group.png` |
+| 17 | `Figure_S17_climate_zone.png` |
+| 18 | `Figure_S18_study_design.png` |
+| 19 | `Figure_S19_prior_sensitivity.png` |
+| 20 | `Figure_S20_aggregation.png` |
+| 21 | `Figure_S21_variance_weighting.png` |
+| 22 | `Figure_S22_funnel_plots.png` |
+| 23 | `Figure_S23_PET_slopes.png` |
+| 24 | `Figure_S24_publication_bias.png` |
+| 25 | `Figure_S25_high_n_exclusion.png` |
+| 26 | `Figure_S26_one_effect_per_study.png` |
+| 27 | `Figure_S27_leave_one_study_out.png` |
+
+Supplementary tables (`output/tables/`):
+
+| Supp. Table | File |
+|---|---|
+| 1 | Search terms and reference habitats (not generated by this code) |
+| 2 | `Table_S2_study_design.csv` |
+| 3 | `Table_S3_main_effects.csv` |
+| 4 | `Table_S4_heterogeneity.csv` |
+| 5 | `Table_S5_habitat_categories.csv` |
+| 6 | `Table_S6_taxonomic_group.csv` |
+| 7 | `Table_S7_biome.csv` |
+| 8 | `Table_S8_forestation_method.csv` |
+| 9 | `Table_S9_climate_zone.csv` |
+| 10 | `Table_S10_area_slopes.csv` |
+| 11 | `Table_S11_age_slopes.csv` |
+| 12 | Screening counts (not generated by this code) |
+| 13 | Models fitted (not generated by this code; see `R/models.R`) |
+| 14 | `Table_S14_priors.csv` |
+| 15 | `Table_S15_funnel_outside.csv` |
+
+Numbers quoted in the text come from these tables and from `output/summaries/`, which also holds the
+data-source and language percentages in the Methods (`data_source_summary.csv`, `papers_by_language.csv`,
+`papers_english_vs_other.csv`), the convergence diagnostics of every model (`model_diagnostics.csv`) and
+the sites more than 50 km from land, which are left off the maps but kept in every model
+(`map_sites_off_land.csv`).
+
+## Citation
+
+If you use this code, please cite the paper and the dataset (see `CITATION.cff`).
+
+## Licence
+
+Code: MIT (see `LICENSE`). The database is published separately on Zenodo under CC BY 4.0.

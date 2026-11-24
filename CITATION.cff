@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the article and the dataset."
+title: "Local biodiversity impacts of land-based climate mitigation: analysis code"
+type: software
+license: MIT
+authors:
+  - family-names: Smith
+    given-names: Jeffrey R.
+  - family-names: Petry
+    given-names: William K.
+  - family-names: Beaury
+    given-names: Evelyn M.
+  - family-names: Richardson
+    given-names: Phoebe R.
+  - family-names: Stouter
+    given-names: Hannah
+  - family-names: Michaels
+    given-names: Rachel L.
+  - family-names: MacArthur-Waltz
+    given-names: Dylan J.
+  - family-names: Mi
+    given-names: Chunrong
+  - family-names: Levine
+    given-names: Jonathan M.
+# doi: <Zenodo DOI of this release, added on publication>
+preferred-citation:
+  type: article
+  title: "The impact of land-based climate change mitigation on local biodiversity: A meta-analysis"
+  authors:
+    - family-names: Smith
+      given-names: Jeffrey R.
+    - family-names: Petry
+      given-names: William K.
+    - family-names: Beaury
+      given-names: Evelyn M.
+    - family-names: Richardson
+      given-names: Phoebe R.
+    - family-names: Stouter
+      given-names: Hannah
+    - family-names: Michaels
+      given-names: Rachel L.
+    - family-names: MacArthur-Waltz
+      given-names: Dylan J.
+    - family-names: Mi
+      given-names: Chunrong
+    - family-names: Levine
+      given-names: Jonathan M.
+  # journal, year, doi: added on publication
